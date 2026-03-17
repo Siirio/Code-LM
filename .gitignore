@@ -1,0 +1,25 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# IntelliJ plugin build
+clients/intellij/.gradle/
+clients/intellij/build/
+clients/intellij/.idea/
+
+# VSCode
+clients/vscode/node_modules/
+clients/vscode/out/
+clients/vscode/*.vsix
+
+# Project exclude paths
+/clients/intellij/.intellijPlatform/

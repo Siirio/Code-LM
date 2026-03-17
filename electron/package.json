@@ -1,0 +1,62 @@
+{
+  "name": "engramai",
+  "version": "1.0.0",
+  "description": "EngramAI — AI Software Architect IDE",
+  "main": "main.js",
+  "author": "EngramAI",
+  "scripts": {
+    "start": "electron .",
+    "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux",
+    "build": "electron-builder --win --mac --linux"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.4"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "ai.engram.app",
+    "productName": "EngramAI",
+    "publish": {
+      "provider": "github",
+      "owner": "Siirio",
+      "repo": "EngramAI"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "!node_modules/**"
+    ],
+    "extraResources": [
+      {
+        "from": "../backend/dist/engramai-backend",
+        "to": "backend-bin",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../docker-compose.yml",
+        "to": "docker-compose.yml"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "../frontend/public/icon.ico"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "../frontend/public/icon.icns"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "../frontend/public/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

@@ -1,0 +1,37 @@
+<idea-plugin>
+    <id>ai.engram.plugin</id>
+    <name>EngramAI</name>
+    <vendor email="support@engramai.dev" url="https://engramai.dev">EngramAI</vendor>
+    <description>
+        AI Software Architect — persistent project memory, code graph analysis,
+        architecture enforcement, and intelligent code generation.
+    </description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow
+            id="EngramAI"
+            anchor="right"
+            factoryClass="ai.engram.plugin.toolwindow.EngramToolWindowFactory"
+            icon="/icons/engram.svg"
+        />
+        <applicationService
+            serviceImplementation="ai.engram.plugin.client.BackendClient"
+        />
+        <projectService
+            serviceImplementation="ai.engram.plugin.client.ProjectSession"
+        />
+    </extensions>
+
+    <actions>
+        <action
+            id="EngramAI.ScanProject"
+            class="ai.engram.plugin.actions.ScanProjectAction"
+            text="Scan Project with EngramAI"
+            description="Index current project into EngramAI knowledge base"
+        >
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>

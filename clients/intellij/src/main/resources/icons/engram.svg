@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 13 13">
+  <!-- Outer circle -->
+  <circle cx="6.5" cy="6.5" r="5.5" fill="none" stroke="#6B8CFF" stroke-width="1.2"/>
+  <!-- Inner dot -->
+  <circle cx="6.5" cy="6.5" r="1.8" fill="#6B8CFF"/>
+  <!-- Neural connection lines -->
+  <line x1="6.5" y1="1" x2="6.5" y2="4.7" stroke="#6B8CFF" stroke-width="0.8"/>
+  <line x1="6.5" y1="8.3" x2="6.5" y2="12" stroke="#6B8CFF" stroke-width="0.8"/>
+  <line x1="1" y1="6.5" x2="4.7" y2="6.5" stroke="#6B8CFF" stroke-width="0.8"/>
+  <line x1="8.3" y1="6.5" x2="12" y2="6.5" stroke="#6B8CFF" stroke-width="0.8"/>
+</svg>
