@@ -33,6 +33,7 @@ jobs:
 
   build-backend:
     name: Build Python backend (${{ matrix.os }})
+    needs: build-frontend
     strategy:
       matrix:
         include:
@@ -46,6 +47,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download built frontend (needed by PyInstaller spec)
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: backend/static/
 
       - uses: actions/setup-python@v5
         with:
