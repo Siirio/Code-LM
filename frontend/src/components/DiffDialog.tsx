@@ -1,4 +1,4 @@
-import MonacoDiffEditor from '@monaco-editor/react'
+import { DiffEditor as MonacoDiffEditor } from '@monaco-editor/react'
 import type { FileEditProposal } from '../api/client'
 
 interface Props {
@@ -44,7 +44,7 @@ export default function DiffDialog({ proposal, onAccept, onAcceptAll, onReject }
               minimap: { enabled: false },
               scrollBeyondLastLine: false,
               wordWrap: 'on',
-            }}
+            } as any}
           />
         </div>
 
