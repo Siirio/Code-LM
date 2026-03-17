@@ -136,20 +136,32 @@ jobs:
       contents: write
 
     steps:
-      - name: Download all artifacts
+      - name: Download electron artifacts (Windows)
         uses: actions/download-artifact@v4
         with:
+          name: engramai-windows-latest
+          path: dist/
+
+      - name: Download electron artifacts (macOS)
+        uses: actions/download-artifact@v4
+        with:
+          name: engramai-macos-latest
+          path: dist/
+
+      - name: Download electron artifacts (Linux)
+        uses: actions/download-artifact@v4
+        with:
+          name: engramai-ubuntu-latest
           path: dist/
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/**/*.exe
-            dist/**/*.dmg
-            dist/**/*.AppImage
-            dist/**/*.zip
-            dist/**/latest*.yml
+            dist/EngramAI-Setup-*.exe
+            dist/EngramAI-*.dmg
+            dist/EngramAI-*.AppImage
+            dist/latest*.yml
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, '-beta') || contains(github.ref, '-rc') }}

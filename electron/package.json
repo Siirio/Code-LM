@@ -29,7 +29,7 @@
     "files": [
       "main.js",
       "preload.js",
-      "!node_modules/**"
+      "node_modules/**"
     ],
     "extraResources": [
       {
