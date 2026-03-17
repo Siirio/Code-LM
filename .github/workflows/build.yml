@@ -121,11 +121,9 @@ jobs:
         with:
           name: engramai-${{ matrix.os }}
           path: |
-            electron/dist/*.exe
-            electron/dist/*.dmg
-            electron/dist/*.AppImage
-            electron/dist/*.zip
-            electron/dist/latest*.yml
+            electron/dist/EngramAI-Setup-*.exe
+            electron/dist/EngramAI-*.dmg
+            electron/dist/EngramAI-*.AppImage
 
   release:
     name: Publish GitHub Release
@@ -161,7 +159,6 @@ jobs:
             dist/EngramAI-Setup-*.exe
             dist/EngramAI-*.dmg
             dist/EngramAI-*.AppImage
-            dist/latest*.yml
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
