@@ -120,10 +120,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: engramai-${{ matrix.os }}
+          if-no-files-found: ignore
           path: |
-            electron/dist/EngramAI-Setup-*.exe
-            electron/dist/EngramAI-*.dmg
-            electron/dist/EngramAI-*.AppImage
+            electron/dist/*.exe
+            electron/dist/*.dmg
+            electron/dist/*.AppImage
 
   release:
     name: Publish GitHub Release
@@ -155,10 +156,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/EngramAI-Setup-*.exe
-            dist/EngramAI-*.dmg
-            dist/EngramAI-*.AppImage
+          files: dist/**
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
