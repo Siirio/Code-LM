@@ -1,5 +1,6 @@
 const { app, BrowserWindow, dialog, shell } = require('electron')
-const { autoUpdater } = require('electron-updater')
+let autoUpdater = null
+try { autoUpdater = require('electron-updater').autoUpdater } catch (_) {}
 const { spawn, execFile, exec } = require('child_process')
 const path = require('path')
 const http = require('http')
@@ -230,7 +231,7 @@ function createMainWindow() {
     mainWindow.show()
     mainWindow.focus()
     // Check for app updates silently
-    if (app.isPackaged) autoUpdater.checkForUpdatesAndNotify()
+    if (app.isPackaged && autoUpdater) autoUpdater.checkForUpdatesAndNotify()
   })
 
   mainWindow.on('closed', () => { mainWindow = null })
@@ -238,23 +239,25 @@ function createMainWindow() {
 
 // ── Auto updater ──────────────────────────────────────────────────────────────
 
-autoUpdater.on('update-available', () => {
-  dialog.showMessageBox({
-    type: 'info',
-    title: 'Update available',
-    message: 'A new version of EngramAI is downloading…',
-    buttons: ['OK'],
+if (autoUpdater) {
+  autoUpdater.on('update-available', () => {
+    dialog.showMessageBox({
+      type: 'info',
+      title: 'Update available',
+      message: 'A new version of EngramAI is downloading…',
+      buttons: ['OK'],
+    })
   })
-})
 
-autoUpdater.on('update-downloaded', () => {
-  dialog.showMessageBox({
-    type: 'question',
-    buttons: ['Restart now', 'Later'],
-    title: 'Update ready',
-    message: 'EngramAI update downloaded. Restart to apply?',
-  }).then(r => { if (r.response === 0) autoUpdater.quitAndInstall() })
-})
+  autoUpdater.on('update-downloaded', () => {
+    dialog.showMessageBox({
+      type: 'question',
+      buttons: ['Restart now', 'Later'],
+      title: 'Update ready',
+      message: 'EngramAI update downloaded. Restart to apply?',
+    }).then(r => { if (r.response === 0) autoUpdater.quitAndInstall() })
+  })
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
