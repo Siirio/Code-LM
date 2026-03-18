@@ -14,15 +14,24 @@ import {
 import DiffDialog from './components/DiffDialog'
 import './index.css'
 
+// ── Electron typings ─────────────────────────────────────────────────────────
+
+declare global {
+  interface Window {
+    electron?: {
+      platform: string
+      openFolder: () => Promise<string | null>
+      onProjectOpened: (cb: (path: string) => void) => void
+    }
+  }
+}
+
 // ── Config ────────────────────────────────────────────────────────────────────
 
-// The project root is passed via URL param or env, falling back to a prompt.
-// In Electron the main process sets ?root= on launch.
 function getProjectConfig(): { projectId: string; rootPath: string } {
   const params = new URLSearchParams(window.location.search)
-  const rootPath = params.get('root') || localStorage.getItem('engramai_root') || ''
-  // Stable UUID from root path string
-  const projectId = params.get('pid') || localStorage.getItem('engramai_pid') || ''
+  const rootPath = params.get('root') || localStorage.getItem('codelm_root') || ''
+  const projectId = params.get('pid') || localStorage.getItem('codelm_pid') || ''
   return { projectId, rootPath }
 }
 
@@ -36,50 +45,107 @@ interface DisplayMessage {
   streaming?: boolean
 }
 
-const SCAN_HELP = `EngramAI — AI Software Architect
+interface CodeLMSettings {
+  fontSize: number
+  interfaceScale: 'compact' | 'normal' | 'comfortable'
+}
 
-Scan modes:
-  /full-scan         — index entire project
-  /auto-scan <hint>  — AI finds context automatically (default)
-  /package-scan      — scan directory of current focus
+const DEFAULT_SETTINGS: CodeLMSettings = {
+  fontSize: 14,
+  interfaceScale: 'normal',
+}
 
-Agents auto-assigned per message:
-  [debugger]   — bugs, errors, root-cause analysis
-  [codegen]    — implement, add, create new code
-  [architect]  — design, structure, DRY, dependencies
+function loadSettings(): CodeLMSettings {
+  try {
+    const raw = localStorage.getItem('codelm_settings')
+    if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) }
+  } catch { /* ignore */ }
+  return { ...DEFAULT_SETTINGS }
+}
 
-File edits require your approval before writing to disk.
-`
+function saveSettings(s: CodeLMSettings) {
+  localStorage.setItem('codelm_settings', JSON.stringify(s))
+}
+
+// ── Slash command definitions ────────────────────────────────────────────────
+
+const SLASH_COMMANDS = [
+  { command: '/full-scan', description: 'Index entire project' },
+  { command: '/auto-scan', description: 'AI finds context automatically' },
+  { command: '/package-scan', description: 'Scan specific directory' },
+]
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function isElectron(): boolean {
+  return Boolean(window.electron)
+}
+
+// ── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
   const { projectId, rootPath } = getProjectConfig()
 
-  // Setup prompt if no config yet
   const [setupDone, setSetupDone] = useState(Boolean(projectId && rootPath))
   const [setupRoot, setSetupRoot] = useState('')
+
+  // Listen for project-opened from Electron menu
+  useEffect(() => {
+    if (window.electron?.onProjectOpened) {
+      window.electron.onProjectOpened((path: string) => {
+        const pid = btoa(path).replace(/[^a-zA-Z0-9]/g, '').slice(0, 32)
+        localStorage.setItem('codelm_root', path)
+        localStorage.setItem('codelm_pid', pid)
+        window.location.search = `?root=${encodeURIComponent(path)}&pid=${pid}`
+      })
+    }
+  }, [])
+
+  function commitSetup(root: string) {
+    const pid = btoa(root).replace(/[^a-zA-Z0-9]/g, '').slice(0, 32)
+    localStorage.setItem('codelm_root', root)
+    localStorage.setItem('codelm_pid', pid)
+    window.location.search = `?root=${encodeURIComponent(root)}&pid=${pid}`
+  }
+
+  async function handleBrowse() {
+    if (window.electron?.openFolder) {
+      const folder = await window.electron.openFolder()
+      if (folder) {
+        setSetupRoot(folder)
+      }
+    }
+  }
 
   if (!setupDone) {
     return (
       <div className="setup-screen">
-        <h1>EngramAI</h1>
+        <h1>Code LM</h1>
         <p>Enter the absolute path to your project root:</p>
-        <input
-          autoFocus
-          value={setupRoot}
-          onChange={e => setSetupRoot(e.target.value)}
-          placeholder="/home/user/my-project"
-          onKeyDown={e => {
-            if (e.key === 'Enter' && setupRoot.trim()) {
-              const root = setupRoot.trim()
-              // derive a stable ID from the path
-              const pid = btoa(root).replace(/[^a-zA-Z0-9]/g, '').slice(0, 32)
-              localStorage.setItem('engramai_root', root)
-              localStorage.setItem('engramai_pid', pid)
-              window.location.search = `?root=${encodeURIComponent(root)}&pid=${pid}`
-            }
-          }}
-        />
-        <p className="hint">Press Enter to continue</p>
+        <div className="setup-input-row">
+          <input
+            autoFocus
+            value={setupRoot}
+            onChange={e => setSetupRoot(e.target.value)}
+            placeholder="/home/user/my-project"
+            onKeyDown={e => {
+              if (e.key === 'Enter' && setupRoot.trim()) {
+                commitSetup(setupRoot.trim())
+              }
+            }}
+          />
+          {isElectron() && (
+            <button className="browse-btn" onClick={handleBrowse}>Browse</button>
+          )}
+        </div>
+        <button
+          className="setup-continue-btn"
+          disabled={!setupRoot.trim()}
+          onClick={() => commitSetup(setupRoot.trim())}
+        >
+          Open Project
+        </button>
+        <p className="hint">Press Enter or click Open Project to continue</p>
       </div>
     )
   }
@@ -92,9 +158,7 @@ export default function App() {
 function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   const [sessions, setSessions] = useState<Session[]>([])
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
-  const [messages, setMessages] = useState<DisplayMessage[]>([
-    { id: 'help', role: 'system', content: SCAN_HELP },
-  ])
+  const [messages, setMessages] = useState<DisplayMessage[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [statusLine, setStatusLine] = useState('')
@@ -103,9 +167,42 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   const [pendingEdit, setPendingEdit] = useState<FileEditProposal | null>(null)
   const [scanBusy, setScanBusy] = useState(false)
 
+  // Settings
+  const [settings, setSettings] = useState<CodeLMSettings>(loadSettings)
+  const [showSettings, setShowSettings] = useState(false)
+
+  // Help modal
+  const [showHelp, setShowHelp] = useState(false)
+
+  // Slash command autocomplete
+  const [slashSuggestions, setSlashSuggestions] = useState<typeof SLASH_COMMANDS>([])
+  const [selectedSuggestion, setSelectedSuggestion] = useState(0)
+
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const streamCancelRef = useRef<(() => void) | null>(null)
+
+  // Apply settings to CSS
+  useEffect(() => {
+    document.documentElement.style.setProperty('--font-size', `${settings.fontSize}px`)
+    document.documentElement.classList.remove('compact', 'comfortable')
+    if (settings.interfaceScale !== 'normal') {
+      document.documentElement.classList.add(settings.interfaceScale)
+    }
+    saveSettings(settings)
+  }, [settings])
+
+  // Listen for project-opened from Electron menu
+  useEffect(() => {
+    if (window.electron?.onProjectOpened) {
+      window.electron.onProjectOpened((path: string) => {
+        const pid = btoa(path).replace(/[^a-zA-Z0-9]/g, '').slice(0, 32)
+        localStorage.setItem('codelm_root', path)
+        localStorage.setItem('codelm_pid', pid)
+        window.location.search = `?root=${encodeURIComponent(path)}&pid=${pid}`
+      })
+    }
+  }, [])
 
   // ── Startup ─────────────────────────────────────────────────────────────────
 
@@ -130,7 +227,11 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
       }
       await loadSessions()
     } catch {
-      addSystem('Backend not running. Start it: cd backend && python main.py')
+      if (isElectron()) {
+        addSystem('Connecting to backend...')
+      } else {
+        addSystem('Backend not available. Start it: cd backend && python main.py')
+      }
     }
   }
 
@@ -153,7 +254,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
       const s = await createSession(projectId)
       setSessions(prev => [s as Session, ...prev])
       setCurrentSessionId(s.id)
-      setMessages([{ id: 'help', role: 'system', content: SCAN_HELP }])
+      setMessages([])
       setAcceptAll(false)
     } catch (e) {
       addSystem(`Could not create session: ${e}`)
@@ -166,12 +267,12 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
     try {
       const msgs = await getMessages(sessionId)
       if (msgs.length === 0) {
-        setMessages([{ id: 'help', role: 'system', content: SCAN_HELP }])
+        setMessages([])
       } else {
         setMessages(msgs.map((m, i) => ({ id: String(i), role: m.role, content: m.content })))
       }
     } catch {
-      setMessages([{ id: 'help', role: 'system', content: SCAN_HELP }])
+      setMessages([])
     }
   }
 
@@ -190,7 +291,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
 
   async function runScan(mode: string, hint?: string) {
     setScanBusy(true)
-    setStatusLine(`Scanning (${mode})…`)
+    setStatusLine(`Scanning (${mode})...`)
     try {
       const result = await scanProject({
         project_id: projectId,
@@ -207,16 +308,70 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
     }
   }
 
-  // ── Send message ──────────────────────────────────────────────────────────────
+  // ── Slash autocomplete logic ──────────────────────────────────────────────
+
+  function updateSlashSuggestions(value: string) {
+    if (value.startsWith('/') && !value.includes(' ')) {
+      const filtered = SLASH_COMMANDS.filter(c => c.command.startsWith(value))
+      setSlashSuggestions(filtered)
+      setSelectedSuggestion(0)
+    } else {
+      setSlashSuggestions([])
+    }
+  }
+
+  function selectSlashCommand(command: string) {
+    // If the command expects an argument, add a space; otherwise just set it
+    setInput(command + (command === '/full-scan' ? '' : ' '))
+    setSlashSuggestions([])
+    inputRef.current?.focus()
+  }
+
+  function handleInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (slashSuggestions.length > 0) {
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSelectedSuggestion(prev => (prev - 1 + slashSuggestions.length) % slashSuggestions.length)
+        return
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSelectedSuggestion(prev => (prev + 1) % slashSuggestions.length)
+        return
+      }
+      if (e.key === 'Tab') {
+        e.preventDefault()
+        selectSlashCommand(slashSuggestions[selectedSuggestion].command)
+        return
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault()
+        selectSlashCommand(slashSuggestions[selectedSuggestion].command)
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setSlashSuggestions([])
+        return
+      }
+    } else {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        send()
+      }
+    }
+  }
+
+  // ── Send message ──────────────────────────────────────────────────────────
 
   async function send() {
     if (busy || !input.trim()) return
     let msg = input.trim()
     setInput('')
+    setSlashSuggestions([])
 
     // Slash command handling
     if (msg.startsWith('/full-scan')) {
-      addSystem('Starting full scan…')
+      addSystem('Starting full scan...')
       await runScan('full')
       const rest = msg.replace('/full-scan', '').trim()
       if (rest) { setInput(rest); setTimeout(send, 100) }
@@ -224,7 +379,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
     }
     if (msg.startsWith('/auto-scan')) {
       const hint = msg.replace('/auto-scan', '').trim() || undefined
-      addSystem(`Auto-scan${hint ? `: ${hint}` : ''}…`)
+      addSystem(`Auto-scan${hint ? `: ${hint}` : ''}...`)
       await runScan('smart', hint)
       if (hint) { setInput(hint); setTimeout(send, 100) }
       return
@@ -269,10 +424,10 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
             )
           )
         },
-        onTool: name => setStatusLine(`Querying ${name}…`),
+        onTool: name => setStatusLine(`Querying ${name}...`),
         onAgent: name => {
           agentLabel = name
-          setStatusLine(`[${name}] thinking…`)
+          setStatusLine(`[${name}] thinking...`)
         },
         onFileEdit: proposal => {
           if (acceptAll) {
@@ -288,7 +443,6 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
           )
           setBusy(false)
           setStatusLine('')
-          // Refresh sessions so title updates
           listSessions(projectId).then(setSessions).catch(() => {})
           inputRef.current?.focus()
         },
@@ -307,10 +461,9 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
     )
   }
 
-  // ── File edits ────────────────────────────────────────────────────────────────
+  // ── File edits ────────────────────────────────────────────────────────────
 
   function applyEdit(proposal: FileEditProposal) {
-    // POST to backend to write file
     fetch('/api/v1/files/apply-edit', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -323,7 +476,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
       .catch(e => addSystem(`Write failed: ${e.message}`))
   }
 
-  // ── Helpers ───────────────────────────────────────────────────────────────────
+  // ── Helpers ───────────────────────────────────────────────────────────────
 
   function addMessage(role: 'user' | 'assistant', content: string) {
     setMessages(prev => [...prev, { id: Date.now().toString(), role, content }])
@@ -333,27 +486,15 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
     setMessages(prev => [...prev, { id: Date.now().toString(), role: 'system', content }])
   }
 
-  // ── Render ────────────────────────────────────────────────────────────────────
+  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
     <div className="ide">
       {/* Sidebar */}
       <aside className="sidebar">
         <div className="sidebar-header">
-          <span className="logo">EngramAI</span>
+          <span className="logo">Code LM</span>
           <span className={`dot ${backendOk ? 'green' : 'red'}`} title={backendOk ? 'Backend connected' : 'Backend offline'} />
-        </div>
-
-        <div className="scan-buttons">
-          <button className="scan-btn" onClick={() => runScan('full')} disabled={scanBusy}>
-            Full Scan
-          </button>
-          <button className="scan-btn" onClick={() => {
-            const hint = prompt('Entry point (class/file name):')
-            if (hint !== null) runScan('smart', hint || undefined)
-          }} disabled={scanBusy}>
-            Auto Scan
-          </button>
         </div>
 
         <div className="sessions-label">Chats</div>
@@ -369,7 +510,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
                 className="delete-btn"
                 onClick={e => { e.stopPropagation(); removeSession(s.id) }}
                 title="Delete chat"
-              >✕</button>
+              >&#10005;</button>
             </div>
           ))}
         </div>
@@ -379,6 +520,15 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
 
       {/* Main chat area */}
       <main className="chat-area">
+        {/* Toolbar */}
+        <div className="toolbar">
+          <div className="toolbar-title">Code LM</div>
+          <div className="toolbar-actions">
+            <button className="toolbar-btn" onClick={() => setShowHelp(true)} title="Help">?</button>
+            <button className="toolbar-btn" onClick={() => setShowSettings(true)} title="Settings">&#9881;</button>
+          </div>
+        </div>
+
         <div className="messages">
           {messages.map(m => (
             <MessageBubble key={m.id} message={m} />
@@ -389,20 +539,121 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
         {statusLine && <div className="status-line">{statusLine}</div>}
 
         <div className="input-bar">
-          <input
-            ref={inputRef}
-            className="chat-input"
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && !e.shiftKey && send()}
-            placeholder="/full-scan · /auto-scan · /package-scan · or just ask…"
-            disabled={busy}
-          />
+          <div className="input-wrapper">
+            {slashSuggestions.length > 0 && (
+              <div className="slash-dropdown">
+                {slashSuggestions.map((s, i) => (
+                  <div
+                    key={s.command}
+                    className={`slash-item ${i === selectedSuggestion ? 'slash-item-selected' : ''}`}
+                    onMouseDown={e => { e.preventDefault(); selectSlashCommand(s.command) }}
+                    onMouseEnter={() => setSelectedSuggestion(i)}
+                  >
+                    <span className="slash-cmd">{s.command}</span>
+                    <span className="slash-desc">{s.description}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <input
+              ref={inputRef}
+              className="chat-input"
+              value={input}
+              onChange={e => {
+                setInput(e.target.value)
+                updateSlashSuggestions(e.target.value)
+              }}
+              onKeyDown={handleInputKeyDown}
+              placeholder="/full-scan, /auto-scan, /package-scan, or just ask..."
+              disabled={busy}
+            />
+          </div>
           <button className="send-btn" onClick={send} disabled={busy || !input.trim()}>
-            {busy ? '…' : 'Send'}
+            {busy ? '...' : 'Send'}
           </button>
         </div>
       </main>
+
+      {/* Settings modal */}
+      {showSettings && (
+        <div className="modal-overlay" onClick={() => setShowSettings(false)}>
+          <div className="modal settings-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">Settings</span>
+              <button className="modal-close" onClick={() => setShowSettings(false)}>&#10005;</button>
+            </div>
+            <div className="modal-body">
+              <div className="setting-row">
+                <label>Font Size: {settings.fontSize}px</label>
+                <input
+                  type="range"
+                  min={12}
+                  max={20}
+                  value={settings.fontSize}
+                  onChange={e => setSettings(s => ({ ...s, fontSize: Number(e.target.value) }))}
+                />
+              </div>
+              <div className="setting-row">
+                <label>Interface Scale</label>
+                <div className="scale-options">
+                  {(['compact', 'normal', 'comfortable'] as const).map(scale => (
+                    <button
+                      key={scale}
+                      className={`scale-btn ${settings.interfaceScale === scale ? 'scale-btn-active' : ''}`}
+                      onClick={() => setSettings(s => ({ ...s, interfaceScale: scale }))}
+                    >
+                      {scale.charAt(0).toUpperCase() + scale.slice(1)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Help modal */}
+      {showHelp && (
+        <div className="modal-overlay" onClick={() => setShowHelp(false)}>
+          <div className="modal help-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">Code LM — AI Software Architect</span>
+              <button className="modal-close" onClick={() => setShowHelp(false)}>&#10005;</button>
+            </div>
+            <div className="modal-body help-body">
+              <section>
+                <h3>Getting Started</h3>
+                <ol>
+                  <li>Open your project folder (File &gt; Open Project)</li>
+                  <li>Run <code>/full-scan</code> to index your codebase</li>
+                  <li>Ask anything about your code</li>
+                </ol>
+              </section>
+              <section>
+                <h3>Chat Commands</h3>
+                <div className="help-commands">
+                  <div><code>/full-scan</code><span>Index your entire project</span></div>
+                  <div><code>/auto-scan &lt;hint&gt;</code><span>Scan only what's relevant to your question</span></div>
+                  <div><code>/package-scan</code><span>Scan a specific directory</span></div>
+                </div>
+              </section>
+              <section>
+                <h3>What Code LM can do</h3>
+                <ul>
+                  <li>Find bugs and explain root causes</li>
+                  <li>Implement new features in your existing code</li>
+                  <li>Analyze architecture and detect violations</li>
+                  <li>Suggest refactoring with your approval</li>
+                </ul>
+              </section>
+              <section>
+                <h3>File Edits</h3>
+                <p>Every code change requires your approval before being written to disk. Use "Accept", "Accept All", or "Reject" in the diff view.</p>
+              </section>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Diff dialog */}
       {pendingEdit && (
@@ -436,7 +687,7 @@ function MessageBubble({ message }: { message: DisplayMessage }) {
     <div className={cls}>
       {message.role === 'assistant' && (
         <div className="message-header">
-          <span className="sender">EngramAI</span>
+          <span className="sender">Code LM</span>
           {message.agentLabel && (
             <span className={`agent-badge agent-${message.agentLabel}`}>{message.agentLabel}</span>
           )}

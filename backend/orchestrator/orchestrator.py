@@ -1,11 +1,17 @@
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncGenerator
 from config import settings
 from llm.factory import get_provider
 
 logger = logging.getLogger(__name__)
+
+# Session-level tool result cache with TTL.
+# Key structure: _session_tool_cache[session_id][(tool_name, json_input)] = (result, timestamp)
+_session_tool_cache: dict[str, dict[tuple[str, str], tuple[str, float]]] = {}
+_TOOL_CACHE_TTL = 300  # 5 minutes
 
 SYSTEM_PROMPT = """You are EngramAI — an AI Software Architect embedded inside a developer's IDE.
 
@@ -37,6 +43,15 @@ Your behavior:
   * Maximum 3 read_file calls per response turn — only read files you will actually propose changes to.
   * Do not call get_project_memory more than once per conversation.
   * Aim to answer in 3 tool-call rounds or fewer. If you have enough information, stop calling tools and respond.
+
+GROUNDING RULES (anti-hallucination — mandatory):
+- Use ONLY class names, method names, file paths, and architecture that appear in tool results or user-provided context. Never invent them.
+- If a class, file, or pattern is NOT present in the retrieved context — say explicitly: "This was not found in the scanned code."
+- Do NOT assume framework conventions (e.g. "in Spring Boot you usually...") unless that convention is visible in the actual code.
+- Do NOT say "typically", "usually", "in most projects", "the standard approach is". You are working with THIS project only.
+- If the request cannot be completed with available context, state exactly what is missing and which tool would retrieve it.
+- When reporting violations or architecture issues: always cite the exact file path, class name, and line number from tool results. If you don't have line numbers, say so.
+- A correct "I don't have enough data" is better than a plausible-sounding fabrication.
 
 Response formatting (output is rendered in a terminal/CLI — not a browser):
 - Prefer section headers over large markdown tables
@@ -225,6 +240,10 @@ async def _execute_tool(tool_name: str, tool_input: dict, project_id: str) -> st
                 LIMIT 30
             """
             relationships = await neo4j_client.query(dep_cypher, {"project_id": project_id, "query": query_text})
+
+        # Compress node records to only essential fields to reduce token usage
+        _KEEP_FIELDS = {"name", "file_path", "layer"}
+        nodes = [{k: v for k, v in n.items() if k in _KEEP_FIELDS} for n in nodes]
 
         return json.dumps({
             "status": "ok",
@@ -451,6 +470,57 @@ def _agent_prompt_extension(agent: str) -> str:
     return ""
 
 
+async def _summarize_history(history_messages: list[dict], api_key: str) -> list[dict]:
+    """Summarize older history messages into a compact summary when history exceeds 10 messages.
+
+    Takes the older messages (all but the last 10), calls Claude Haiku to produce
+    a 1-2 paragraph summary, then returns a condensed message list:
+    [summary_user_msg, ack_assistant_msg] + last_10_messages.
+    """
+    if len(history_messages) <= 10:
+        return history_messages
+
+    import anthropic
+    older = history_messages[:-10]
+    recent = history_messages[-10:]
+
+    # Format older messages into a readable transcript for summarization
+    transcript_lines = []
+    for msg in older:
+        role_label = "User" if msg["role"] == "user" else "Assistant"
+        content = msg["content"] if isinstance(msg["content"], str) else str(msg["content"])
+        transcript_lines.append(f"{role_label}: {content}")
+    transcript = "\n".join(transcript_lines)
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        summary_response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Summarize the following conversation into 1-2 concise paragraphs. "
+                    "Focus on key decisions, topics discussed, and any important context. "
+                    "Be factual and brief.\n\n"
+                    f"{transcript}"
+                ),
+            }],
+        )
+        summary_text = summary_response.content[0].text
+    except Exception:
+        logger.warning("History summarization failed — falling back to truncation", exc_info=True)
+        # Fallback: just use the last 10 messages without summary
+        return recent
+
+    condensed = [
+        {"role": "user", "content": f"Summary of earlier conversation: {summary_text}"},
+        {"role": "assistant", "content": "Understood."},
+    ]
+    condensed.extend(recent)
+    return condensed
+
+
 async def chat(
     project_id: str,
     message: str,
@@ -489,12 +559,12 @@ async def chat(
         if persona and persona.get("system_prompt_extra"):
             system_prompt_with_context += f"\n\n{persona['system_prompt_extra']}"
 
-    # Build conversation history from session
+    # Build conversation history from session, with summarization for long histories
     messages: list[dict] = []
     if session_id:
         history = await get_messages(session_id)
-        for msg in history:
-            messages.append({"role": msg["role"], "content": msg["content"]})
+        history_msgs = [{"role": msg["role"], "content": msg["content"]} for msg in history]
+        messages = await _summarize_history(history_msgs, settings.active_api_key)
         # Persist the new user message
         await save_message(session_id, "user", message)
 
@@ -613,8 +683,8 @@ async def chat_stream(
     messages: list[dict] = []
     if session_id and detected_agent == "main":
         history = await get_messages(session_id)
-        for msg in history:
-            messages.append({"role": msg["role"], "content": msg["content"]})
+        history_msgs = [{"role": msg["role"], "content": msg["content"]} for msg in history]
+        messages = await _summarize_history(history_msgs, settings.active_api_key)
         await save_message(session_id, "user", message)
     elif session_id:
         # Sub-agents: fresh context, but still persist messages for continuity
@@ -623,9 +693,12 @@ async def chat_stream(
     messages.append({"role": "user", "content": message})
 
     tool_round = 0
-    # Cache: (tool_name, cache_key) -> result string.  Prevents duplicate API calls
-    # when the LLM issues identical tool calls in the same conversation.
-    tool_cache: dict[tuple[str, str], str] = {}
+    # Session-level tool result cache with TTL — prevents duplicate API calls
+    # across the entire session, not just within a single request.
+    cache_session_key = session_id or conversation_id or "__anonymous__"
+    if cache_session_key not in _session_tool_cache:
+        _session_tool_cache[cache_session_key] = {}
+    tool_cache = _session_tool_cache[cache_session_key]
 
     while True:
         # Open a streaming request to Anthropic
@@ -706,17 +779,20 @@ async def chat_stream(
 
         tool_results = []
         for tc in tool_calls:
-            # Deduplication cache — same tool + same input returns instantly
+            # Deduplication cache with TTL — same tool + same input returns
+            # cached result if it hasn't expired.
             cache_key = (tc["name"], json.dumps(tc["input"], sort_keys=True))
-            if cache_key in tool_cache:
+            now = time.time()
+            cached = tool_cache.get(cache_key)
+            if cached and (now - cached[1]) < _TOOL_CACHE_TTL:
                 logger.info(
                     "chat_stream [%s]: cache hit for %s — skipping duplicate call",
                     project_id, tc["name"],
                 )
-                result = tool_cache[cache_key]
+                result = cached[0]
             else:
                 result = await _execute_tool(tc["name"], tc["input"], project_id)
-                tool_cache[cache_key] = result
+                tool_cache[cache_key] = (result, now)
 
             # Emit file_edit SSE so the IDE can show an accept/reject dialog
             if tc["name"] == "propose_file_edit":

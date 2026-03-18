@@ -1,7 +1,7 @@
-// Minimal preload — no Node APIs exposed to renderer.
-// The React app talks to the backend over HTTP only.
-const { contextBridge } = require('electron')
+const { contextBridge, ipcRenderer } = require('electron')
 
-contextBridge.exposeInMainWorld('engramAI', {
+contextBridge.exposeInMainWorld('electron', {
   platform: process.platform,
+  openFolder: () => ipcRenderer.invoke('open-folder'),
+  onProjectOpened: (cb) => ipcRenderer.on('project-opened', (_, path) => cb(path)),
 })

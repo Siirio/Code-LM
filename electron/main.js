@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, shell } = require('electron')
+const { app, BrowserWindow, dialog, shell, ipcMain, Menu } = require('electron')
 let autoUpdater = null
 try { autoUpdater = require('electron-updater').autoUpdater } catch (_) {}
 const { spawn, execFile, exec } = require('child_process')
@@ -64,7 +64,7 @@ function showLoading(message) {
       @keyframes slide { 0%{width:0%} 50%{width:80%} 100%{width:100%} }
     </style></head>
     <body>
-      <div class="logo">EngramAI</div>
+      <div class="logo">Code LM</div>
       <div class="msg" id="m">${message}</div>
       <div class="bar"><div class="fill"></div></div>
     </body></html>`)
@@ -121,8 +121,8 @@ async function ensureDatabases() {
     const choice = await dialog.showMessageBox({
       type: 'warning',
       title: 'Docker required',
-      message: 'EngramAI needs Docker to run its databases.',
-      detail: 'Install Docker Desktop, then restart EngramAI.\n\nDocker Desktop: https://www.docker.com/products/docker-desktop',
+      message: 'Code LM needs Docker to run its databases.',
+      detail: 'Install Docker Desktop, then restart Code LM.\n\nDocker Desktop: https://www.docker.com/products/docker-desktop',
       buttons: ['Open Docker website', 'Continue anyway', 'Quit'],
       defaultId: 0,
     })
@@ -143,7 +143,7 @@ async function ensureDatabases() {
       type: 'warning',
       title: 'Database startup failed',
       message: 'Could not start databases automatically.',
-      detail: `${e.message}\n\nEngramAI will try to connect to existing databases.`,
+      detail: `${e.message}\n\nCode LM will try to connect to existing databases.`,
       buttons: ['OK'],
     })
   }
@@ -152,7 +152,7 @@ async function ensureDatabases() {
 // ── Backend process ───────────────────────────────────────────────────────────
 
 function startBackend() {
-  updateLoading('Starting EngramAI backend…')
+  updateLoading('Starting Code LM backend…')
 
   let bin, args, cwd
 
@@ -220,7 +220,7 @@ function createMainWindow() {
       nodeIntegration: false,
       contextIsolation: true,
     },
-    title: 'EngramAI',
+    title: 'Code LM',
     show: false,
   })
 
@@ -244,7 +244,7 @@ if (autoUpdater) {
     dialog.showMessageBox({
       type: 'info',
       title: 'Update available',
-      message: 'A new version of EngramAI is downloading…',
+      message: 'A new version of Code LM is downloading…',
       buttons: ['OK'],
     })
   })
@@ -254,7 +254,7 @@ if (autoUpdater) {
       type: 'question',
       buttons: ['Restart now', 'Later'],
       title: 'Update ready',
-      message: 'EngramAI update downloaded. Restart to apply?',
+      message: 'Code LM update downloaded. Restart to apply?',
     }).then(r => { if (r.response === 0) autoUpdater.quitAndInstall() })
   })
 }
@@ -263,9 +263,71 @@ if (autoUpdater) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
 
+// ── IPC handlers ─────────────────────────────────────────────────────────
+
+ipcMain.handle('open-folder', async () => {
+  const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
+  return result.canceled ? null : result.filePaths[0]
+})
+
+// ── Application menu ─────────────────────────────────────────────────────
+
+function buildMenu() {
+  const template = [
+    {
+      label: 'File',
+      submenu: [
+        {
+          label: 'Open Project...',
+          accelerator: 'CmdOrCtrl+O',
+          click: async () => {
+            const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
+            if (!result.canceled && result.filePaths[0] && mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('project-opened', result.filePaths[0])
+            }
+          },
+        },
+        {
+          label: 'New Window',
+          accelerator: 'CmdOrCtrl+Shift+N',
+          click: () => {
+            createMainWindow()
+          },
+        },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload' },
+        { role: 'forceReload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
 // ── App lifecycle ─────────────────────────────────────────────────────────────
 
 app.whenReady().then(async () => {
+  buildMenu()
   showLoading('Initialising…')
 
   await ensureDatabases()

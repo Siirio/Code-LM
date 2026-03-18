@@ -1,7 +1,7 @@
 {
-  "name": "engramai",
+  "name": "codelm",
   "version": "1.0.0",
-  "description": "EngramAI — AI Software Architect IDE",
+  "description": "Code LM — AI Software Architect IDE",
   "main": "main.js",
   "author": "EngramAI",
   "scripts": {
@@ -20,7 +20,7 @@
   },
   "build": {
     "appId": "ai.engram.app",
-    "productName": "EngramAI",
+    "productName": "Code LM",
     "publish": {
       "provider": "github",
       "owner": "Siirio",
