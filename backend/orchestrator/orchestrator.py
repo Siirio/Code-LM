@@ -8,6 +8,29 @@ from llm.factory import get_provider
 
 logger = logging.getLogger(__name__)
 
+# Tools that require deep code analysis — use Sonnet for these rounds
+_CODE_ANALYSIS_TOOLS = frozenset({
+    "query_code_graph", "search_files", "read_file",
+    "propose_file_edit", "analyze_impact",
+})
+
+
+def _select_model(provider_name: str, tool_names_called: list[str], base_model: str) -> str:
+    """Route to cheaper model for intent steps, heavier model for code analysis."""
+    if provider_name.lower() != "anthropic":
+        return base_model  # Only route for Anthropic
+    if any(t in _CODE_ANALYSIS_TOOLS for t in tool_names_called):
+        return "claude-sonnet-4-6"
+    return "claude-haiku-4-5-20251001"
+
+
+def _system_param(provider_name: str, text: str) -> str | list:
+    """Wrap system prompt with cache_control for Anthropic, plain string otherwise."""
+    if provider_name.lower() == "anthropic":
+        return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
+    return text
+
+
 # Session-level tool result cache with TTL.
 # Key structure: _session_tool_cache[session_id][(tool_name, json_input)] = (result, timestamp)
 _session_tool_cache: dict[str, dict[tuple[str, str], tuple[str, float]]] = {}
@@ -524,11 +547,11 @@ async def _summarize_history(history_messages: list[dict], api_key: str) -> list
 def _default_model(provider_name: str) -> str:
     """Return the default model name for a given LLM provider."""
     defaults = {
-        "anthropic": "claude-opus-4-6",
+        "anthropic": "claude-sonnet-4-6",
         "openai": "gpt-4o",
         "gemini": "gemini-1.5-flash",
     }
-    return defaults.get(provider_name.lower().strip(), "claude-opus-4-6")
+    return defaults.get(provider_name.lower().strip(), "claude-sonnet-4-6")
 
 
 async def chat(
@@ -592,7 +615,7 @@ async def chat(
 
     # Agentic loop: keep going until the LLM stops calling tools
     while True:
-        response = provider.chat(messages=messages, tools=TOOLS, system=system_prompt_with_context)
+        response = provider.chat(messages=messages, tools=TOOLS, system=_system_param(provider_name, system_prompt_with_context))
 
         if response.stop_reason == "end_turn":
             reply = response.reply or "I processed your request but had no text response."
@@ -624,10 +647,16 @@ async def chat(
                     memory_update_proposed = True
                     memory_update_proposal = tc.input
 
+                # For get_project_memory results with Anthropic, mark as cacheable
+                if tc.name == "get_project_memory" and provider_name.lower() == "anthropic":
+                    tool_result_content = [{"type": "text", "text": result, "cache_control": {"type": "ephemeral"}}]
+                else:
+                    tool_result_content = result
+
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tc.id,
-                    "content": result,
+                    "content": tool_result_content,
                 })
 
             messages.append({"role": "user", "content": tool_results})
@@ -720,6 +749,9 @@ async def chat_stream(
     messages.append({"role": "user", "content": message})
 
     tool_round = 0
+    # Smart model routing: start with Haiku, escalate to Sonnet for code analysis
+    current_model = "claude-haiku-4-5-20251001" if provider_name.lower() == "anthropic" else resolved_model
+
     # Session-level tool result cache with TTL — prevents duplicate API calls
     # across the entire session, not just within a single request.
     cache_session_key = session_id or conversation_id or "__anonymous__"
@@ -727,12 +759,15 @@ async def chat_stream(
         _session_tool_cache[cache_session_key] = {}
     tool_cache = _session_tool_cache[cache_session_key]
 
+    # Wrap system prompt with cache_control for Anthropic
+    system_param = _system_param(provider_name, system_prompt_with_context)
+
     while True:
         # Open a streaming request to Anthropic
         with client.messages.stream(
-            model=resolved_model,
+            model=current_model,
             max_tokens=4096,
-            system=system_prompt_with_context,
+            system=system_param,
             tools=TOOLS,
             messages=messages,
         ) as stream:
@@ -830,13 +865,24 @@ async def chat_stream(
                 except Exception:
                     pass
 
+            # For get_project_memory results with Anthropic, mark as cacheable
+            if tc["name"] == "get_project_memory" and provider_name.lower() == "anthropic":
+                tool_result_content = [{"type": "text", "text": result, "cache_control": {"type": "ephemeral"}}]
+            else:
+                tool_result_content = result
+
             tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": tc["id"],
-                "content": result,
+                "content": tool_result_content,
             })
 
         messages.append({"role": "user", "content": tool_results})
+
+        # Smart model routing: pick model for next round based on tools called this round
+        last_tool_names = [tc["name"] for tc in tool_calls]
+        current_model = _select_model(provider_name, last_tool_names, resolved_model)
+
         tool_calls = []
         # Continue the while loop to stream the next LLM turn
 

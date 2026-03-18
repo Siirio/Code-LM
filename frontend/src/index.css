@@ -810,6 +810,35 @@ body {
 .auth-advanced-toggle { font-size: 11px; color: var(--text-dim); cursor: pointer; margin-bottom: 8px; background: none; border: none; font-family: var(--font-mono); padding: 0; }
 .auth-advanced-toggle:hover { color: var(--text); }
 
+/* ── Auth tabs ────────────────────────────────────────────────────────────── */
+
+.auth-tabs { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 0; }
+.auth-tab { flex: 1; padding: 10px; background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-dim); font-family: var(--font-mono); font-size: 12px; cursor: pointer; transition: all 0.15s; }
+.auth-tab:hover { color: var(--text); }
+.auth-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+/* ── Credits UI ───────────────────────────────────────────────────────────── */
+
+.credits-balance { text-align: center; padding: 20px 0; }
+.credits-amount { font-size: 36px; font-weight: 700; color: var(--green); }
+.credits-unit { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+.credits-status { font-size: 12px; margin-top: 8px; }
+.credits-status.ok { color: var(--green); }
+.credits-status.empty { color: var(--red); }
+
+.credits-plans { display: flex; gap: 8px; margin: 16px 0; }
+.credits-plan-btn { flex: 1; padding: 12px 8px; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-family: var(--font-mono); font-size: 11px; cursor: pointer; transition: all 0.15s; text-align: center; }
+.credits-plan-btn:hover { border-color: var(--accent); background: rgba(14,99,156,0.1); }
+.credits-plan-btn .plan-price { font-size: 16px; font-weight: 700; color: var(--green); display: block; }
+.credits-plan-btn .plan-credits { font-size: 10px; color: var(--text-dim); display: block; margin-top: 2px; }
+.credits-note { font-size: 11px; color: var(--text-dim); text-align: center; margin-bottom: 16px; }
+.credits-start-btn { width: 100%; padding: 10px; background: var(--accent); border: none; border-radius: 4px; color: #fff; font-family: var(--font-mono); font-size: 14px; cursor: pointer; }
+.credits-start-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.credits-indicator { display: flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 4px; cursor: pointer; border: 1px solid transparent; transition: all 0.15s; margin-right: 4px; }
+.credits-indicator:hover { background: var(--bg3); border-color: var(--border); }
+.credits-label { font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); }
+
 /* ── Auth indicator in toolbar ────────────────────────────────────────────── */
 
 .auth-indicator { display: flex; align-items: center; gap: 5px; padding: 4px 8px; border-radius: 4px; cursor: pointer; border: 1px solid transparent; transition: all 0.15s; margin-right: 4px; }

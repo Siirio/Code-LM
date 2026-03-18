@@ -24,6 +24,36 @@ export function clearAuth() {
   localStorage.removeItem('codelm_auth')
 }
 
+// ── Credits config (pay-per-message concept) ─────────────────────────────────
+
+export interface CreditsConfig {
+  balance: number       // remaining credits
+  plan: 'free' | 'paid'
+}
+
+const CREDITS_KEY = 'codelm_credits'
+const COST_PER_MESSAGE = 2  // mock: each message costs 2 credits
+
+export function loadCredits(): CreditsConfig {
+  try {
+    const raw = localStorage.getItem(CREDITS_KEY)
+    if (raw) return JSON.parse(raw)
+  } catch {}
+  return { balance: 0, plan: 'free' }
+}
+
+export function saveCredits(c: CreditsConfig) {
+  localStorage.setItem(CREDITS_KEY, JSON.stringify(c))
+}
+
+export function deductCredit(): boolean {
+  const c = loadCredits()
+  if (c.plan === 'free') return true  // API key users: no deduction
+  if (c.balance <= 0) return false    // out of credits
+  saveCredits({ ...c, balance: c.balance - COST_PER_MESSAGE })
+  return true
+}
+
 function authHeaders(): Record<string, string> {
   const auth = loadAuth()
   if (!auth) return {}

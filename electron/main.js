@@ -167,10 +167,9 @@ function startBackend() {
       return
     }
   } else {
-    // Dev mode: use system Python
-    bin = process.platform === 'win32' ? 'python' : 'python3'
-    args = ['main.py', '--dev']
-    cwd = path.join(__dirname, '..', 'backend')
+    // Dev mode: backend must be started manually (python main.py --dev)
+    updateLoading('Waiting for backend on :8765…')
+    return
   }
 
   backendProcess = spawn(bin, args, { cwd, env: { ...process.env } })

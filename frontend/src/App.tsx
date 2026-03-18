@@ -3,16 +3,20 @@ import {
   chatStream,
   clearAuth,
   createSession,
+  deductCredit,
   deleteSession,
   fetchFileTree,
   getMessages,
   getProjectStatus,
   listSessions,
   loadAuth,
+  loadCredits,
   saveAuth,
+  saveCredits,
   scanProject,
   type AuthConfig,
   type ChatMessage,
+  type CreditsConfig,
   type FileEditProposal,
   type Session,
 } from './api/client'
@@ -258,6 +262,9 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   const [auth, setAuth] = useState<AuthConfig | null>(loadAuth)
   const [showAuth, setShowAuth] = useState(false)
 
+  // Credits
+  const [credits, setCredits] = useState<CreditsConfig>(loadCredits)
+
   // Left panel tab
   const [leftTab, setLeftTab] = useState<'chats' | 'files'>('chats')
 
@@ -441,7 +448,23 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
 
   async function send() {
     if (busy || !input.trim()) return
+
+    // Credits mode: no API key but has credits balance
     if (!auth || !auth.apiKey) {
+      if (credits.balance > 0 && credits.plan === 'paid') {
+        // Deduct credit and show mock response
+        if (!deductCredit()) {
+          setShowAuth(true)
+          return
+        }
+        setCredits(loadCredits())
+        const mockMsg = input.trim()
+        setInput('')
+        setSlashSuggestions([])
+        addMessage('user', mockMsg)
+        addMessage('assistant', '[Credits mode] This feature is coming soon. Add your API key to start chatting now.')
+        return
+      }
       setShowAuth(true)
       return
     }
@@ -614,6 +637,12 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
         <div className="toolbar">
           <div className="toolbar-title">Code LM</div>
           <div className="toolbar-actions">
+            {!auth && (
+              <div className="credits-indicator" onClick={() => setShowAuth(true)} title="Credits balance">
+                <span className="credits-icon">{'\uD83D\uDCB3'}</span>
+                <span className="credits-label">{credits.balance} cr</span>
+              </div>
+            )}
             <div className="auth-indicator" onClick={() => setShowAuth(true)} title={auth ? `${auth.provider} connected` : 'No API key'}>
               <span className={`auth-dot ${auth ? 'connected' : 'disconnected'}`} />
               <span className="auth-label">{auth ? auth.provider : 'Connect'}</span>
@@ -764,6 +793,9 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
             setShowAuth(false)
           }}
           hasExisting={Boolean(auth)}
+          credits={credits}
+          onCreditsChange={(c) => { saveCredits(c); setCredits(c) }}
+          onStartCredits={() => setShowAuth(false)}
         />
       )}
 
@@ -831,16 +863,27 @@ function AuthModal({
   onSave,
   onDisconnect,
   hasExisting,
+  credits,
+  onCreditsChange,
+  onStartCredits,
 }: {
   initial: AuthConfig | null
   onSave: (config: AuthConfig) => void
   onDisconnect: () => void
   hasExisting: boolean
+  credits: CreditsConfig
+  onCreditsChange: (c: CreditsConfig) => void
+  onStartCredits: () => void
 }) {
   const [provider, setProvider] = useState<AuthConfig['provider']>(initial?.provider || 'anthropic')
   const [apiKey, setApiKey] = useState(initial?.apiKey || '')
   const [model, setModel] = useState(initial?.model || '')
   const [showAdvanced, setShowAdvanced] = useState(Boolean(initial?.model))
+  const [authTab, setAuthTab] = useState<'key' | 'credits'>('key')
+
+  const purchaseCredits = (amount: number) => {
+    onCreditsChange({ balance: credits.balance + amount, plan: 'paid' })
+  }
 
   return (
     <div className="modal-overlay">
@@ -851,70 +894,129 @@ function AuthModal({
             <button className="modal-close" onClick={onDisconnect} title="Disconnect">&#10005;</button>
           )}
         </div>
-        <div className="modal-body">
-          <p style={{ fontSize: '12px', color: 'var(--text-dim)', marginBottom: '16px' }}>
-            Enter your API key to start using Code LM
-          </p>
 
-          <div className="auth-provider-row">
-            {(['anthropic', 'openai', 'gemini'] as const).map(p => (
-              <button
-                key={p}
-                className={`auth-provider-btn ${provider === p ? 'active' : ''}`}
-                onClick={() => setProvider(p)}
-              >
-                {p.charAt(0).toUpperCase() + p.slice(1)}
-              </button>
-            ))}
-          </div>
-
-          <input
-            type="password"
-            className="auth-input"
-            placeholder={PROVIDER_PLACEHOLDERS[provider]}
-            value={apiKey}
-            onChange={e => setApiKey(e.target.value)}
-            autoFocus
-          />
-
-          <a
-            className="auth-link"
-            href={PROVIDER_LINKS[provider]}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Get your API key &rarr;
-          </a>
-
+        <div className="auth-tabs">
           <button
-            className="auth-advanced-toggle"
-            onClick={() => setShowAdvanced(!showAdvanced)}
+            className={`auth-tab ${authTab === 'key' ? 'active' : ''}`}
+            onClick={() => setAuthTab('key')}
           >
-            {showAdvanced ? '- Advanced' : '+ Advanced'}
+            API Key
           </button>
+          <button
+            className={`auth-tab ${authTab === 'credits' ? 'active' : ''}`}
+            onClick={() => setAuthTab('credits')}
+          >
+            Code LM Credits
+          </button>
+        </div>
 
-          {showAdvanced && (
-            <input
-              className="auth-input"
-              placeholder="Custom model name (optional)"
-              value={model}
-              onChange={e => setModel(e.target.value)}
-            />
+        <div className="modal-body">
+          {authTab === 'key' && (
+            <>
+              <p style={{ fontSize: '12px', color: 'var(--text-dim)', marginBottom: '16px' }}>
+                Enter your API key to start using Code LM
+              </p>
+
+              <div className="auth-provider-row">
+                {(['anthropic', 'openai', 'gemini'] as const).map(p => (
+                  <button
+                    key={p}
+                    className={`auth-provider-btn ${provider === p ? 'active' : ''}`}
+                    onClick={() => setProvider(p)}
+                  >
+                    {p.charAt(0).toUpperCase() + p.slice(1)}
+                  </button>
+                ))}
+              </div>
+
+              <input
+                type="password"
+                className="auth-input"
+                placeholder={PROVIDER_PLACEHOLDERS[provider]}
+                value={apiKey}
+                onChange={e => setApiKey(e.target.value)}
+                autoFocus
+              />
+
+              <a
+                className="auth-link"
+                href={PROVIDER_LINKS[provider]}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Get your API key &rarr;
+              </a>
+
+              <button
+                className="auth-advanced-toggle"
+                onClick={() => setShowAdvanced(!showAdvanced)}
+              >
+                {showAdvanced ? '- Advanced' : '+ Advanced'}
+              </button>
+
+              {showAdvanced && (
+                <input
+                  className="auth-input"
+                  placeholder="Custom model name (optional)"
+                  value={model}
+                  onChange={e => setModel(e.target.value)}
+                />
+              )}
+
+              <button
+                className="auth-connect-btn"
+                disabled={!apiKey.trim()}
+                onClick={() =>
+                  onSave({
+                    provider,
+                    apiKey: apiKey.trim(),
+                    ...(model.trim() ? { model: model.trim() } : {}),
+                  })
+                }
+              >
+                Connect
+              </button>
+            </>
           )}
 
-          <button
-            className="auth-connect-btn"
-            disabled={!apiKey.trim()}
-            onClick={() =>
-              onSave({
-                provider,
-                apiKey: apiKey.trim(),
-                ...(model.trim() ? { model: model.trim() } : {}),
-              })
-            }
-          >
-            Connect
-          </button>
+          {authTab === 'credits' && (
+            <>
+              <div className="credits-balance">
+                <div className="credits-amount">{'\uD83D\uDCB3'} {credits.balance}</div>
+                <div className="credits-unit">credits</div>
+                <div className={`credits-status ${credits.balance > 0 ? 'ok' : 'empty'}`}>
+                  {credits.balance > 0 ? 'Credits active' : 'No credits'}
+                </div>
+              </div>
+
+              <div className="credits-plans">
+                <button className="credits-plan-btn" onClick={() => purchaseCredits(500)}>
+                  <span className="plan-price">$5</span>
+                  <span className="plan-credits">500 credits</span>
+                </button>
+                <button className="credits-plan-btn" onClick={() => purchaseCredits(1200)}>
+                  <span className="plan-price">$10</span>
+                  <span className="plan-credits">1,200 credits</span>
+                </button>
+                <button className="credits-plan-btn" onClick={() => purchaseCredits(3500)}>
+                  <span className="plan-price">$25</span>
+                  <span className="plan-credits">3,500 credits</span>
+                </button>
+              </div>
+
+              <div className="credits-note">
+                Credits are consumed per message. 1 message = 2 credits.
+              </div>
+
+              <button
+                className="credits-start-btn"
+                disabled={credits.balance <= 0}
+                onClick={onStartCredits}
+              >
+                Start chatting {'\u2192'}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>
