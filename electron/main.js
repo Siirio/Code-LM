@@ -102,8 +102,8 @@ function dockerComposeUp() {
     const proc = execFile(cmd, args, { timeout: 60000 }, (err, stdout, stderr) => {
       if (err) {
         // Try legacy docker-compose
-        execFile('docker-compose', ['-f', composePath, 'up', '-d'], { timeout: 60000 }, (err2) => {
-          if (err2) reject(new Error('Could not start databases via Docker'))
+        execFile('docker-compose', ['-f', composePath, 'up', '-d'], { timeout: 60000 }, (err2, stdout2, stderr2) => {
+          if (err2) reject(new Error(`docker compose: ${stderr || err.message}\ndocker-compose: ${stderr2 || err2.message}\ncompose file: ${composePath}`))
           else resolve()
         })
       } else {
