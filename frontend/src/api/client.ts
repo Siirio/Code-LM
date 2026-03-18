@@ -183,6 +183,18 @@ export async function fetchFileTree(root: string): Promise<any> {
   return r.json()
 }
 
+export async function fetchFileContent(path: string): Promise<{
+  type: 'text' | 'image' | 'binary'
+  content: string
+  mime?: string
+  ext: string
+  size: number
+}> {
+  const r = await fetch(`${BASE}/files/content?path=${encodeURIComponent(path)}`)
+  if (!r.ok) throw new Error(await r.text())
+  return r.json()
+}
+
 // ── Chat stream ───────────────────────────────────────────────────────────────
 
 export function chatStream(
