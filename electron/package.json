@@ -1,6 +1,6 @@
 {
   "name": "codelm",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Code LM — AI Software Architect IDE",
   "main": "main.js",
   "author": "EngramAI",
@@ -28,7 +28,10 @@
     },
     "files": [
       "main.js",
-      "preload.js"
+      "preload.js",
+      "portFinder.js",
+      "composeWriter.js",
+      "dockerManager.js"
     ],
     "extraResources": [
       {
