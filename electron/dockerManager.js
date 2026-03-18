@@ -21,7 +21,9 @@ const path                = require('path')
 const { findEngramAIPorts } = require('./portFinder')
 const { writeRuntimeCompose } = require('./composeWriter')
 
-const PORTS_FILE = () => path.join(app.getPath('userData'), 'engramai-ports.json')
+const USER_DATA   = () => app.getPath('userData')
+const PORTS_FILE  = () => path.join(USER_DATA(), 'engramai-ports.json')
+const RUNTIME_COMPOSE = () => path.join(USER_DATA(), 'docker-compose.runtime.yml')
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -86,12 +88,12 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
 
 /**
  * Start EngramAI containers, returning the ports they're bound to.
+ * Runtime compose file is written to userData (always writable, even in Program Files installs).
  *
- * @param {string}   composeDir     Directory containing docker-compose files
  * @param {Function} updateLoading  Callback(message) to update the splash screen
  * @returns {Promise<{postgres: number, neo4jBolt: number, neo4jBrowser: number, qdrant: number}>}
  */
-async function startContainers(composeDir, updateLoading = () => {}) {
+async function startContainers(updateLoading = () => {}) {
   updateLoading('Checking Docker…')
 
   const dockerOk = await isDockerAvailable()
@@ -106,7 +108,6 @@ async function startContainers(composeDir, updateLoading = () => {}) {
       updateLoading('Databases already running…')
       return saved
     }
-    // Running but no saved ports — fall through to detect ports via compose up
     console.warn('[dockerManager] Containers running but no saved ports — restarting')
   }
 
@@ -115,8 +116,8 @@ async function startContainers(composeDir, updateLoading = () => {}) {
   const ports = await findEngramAIPorts()
   console.log('[dockerManager] Allocated ports:', ports)
 
-  // ── Write runtime compose ─────────────────────────────────────────────────
-  const runtimeComposePath = writeRuntimeCompose(composeDir, ports)
+  // ── Write runtime compose to userData (writable on all platforms) ──────────
+  const runtimeComposePath = writeRuntimeCompose(USER_DATA(), ports)
   console.log('[dockerManager] Wrote', runtimeComposePath)
 
   // ── Start containers ───────────────────────────────────────────────────────
@@ -137,8 +138,8 @@ async function startContainers(composeDir, updateLoading = () => {}) {
  *
  * @param {string} composeDir
  */
-async function stopContainers(composeDir) {
-  const runtimePath = path.join(composeDir, 'docker-compose.runtime.yml')
+async function stopContainers() {
+  const runtimePath = RUNTIME_COMPOSE()
   if (!fs.existsSync(runtimePath)) return
   try {
     await runCompose(runtimePath, ['down'])

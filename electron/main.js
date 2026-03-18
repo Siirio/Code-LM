@@ -24,9 +24,6 @@ function backendBinaryPath() {
   return dir
 }
 
-function composeDir() {
-  return resourcesDir()
-}
 
 // ── Loading window ────────────────────────────────────────────────────────────
 
@@ -273,7 +270,7 @@ app.whenReady().then(async () => {
   // ── Start Docker containers with dynamic ports ──────────────────────────
   let ports = null
   try {
-    ports = await startContainers(composeDir(), updateLoading)
+    ports = await startContainers(updateLoading)
 
     if (ports === null) {
       // Docker not available
@@ -333,5 +330,5 @@ app.on('activate', () => {
 
 app.on('before-quit', async () => {
   if (backendProcess) backendProcess.kill()
-  await stopContainers(composeDir())
+  await stopContainers()
 })
