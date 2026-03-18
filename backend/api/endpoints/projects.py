@@ -70,7 +70,7 @@ async def project_agents(project_id: str):
 async def project_status(project_id: str):
     try:
         project = await get_or_create_project(project_id)
-    except (SQLAlchemyError, RuntimeError) as exc:
+    except Exception as exc:
         # Return a valid 200 response instead of 503 so IDE clients can still
         # proceed.  A 503 would be treated as an exception by the plugin and
         # surface a confusing "Could not check index status" error to the user.

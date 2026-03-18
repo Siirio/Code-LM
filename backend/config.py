@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     # ── PostgreSQL ────────────────────────────────────────────────────────────
     postgres_host: str = "localhost"
-    postgres_port: int = 5432
+    postgres_port: int = 5433
     postgres_db: str = "engramai"
     postgres_user: str = "engramai"
     postgres_password: str = "engramai"
