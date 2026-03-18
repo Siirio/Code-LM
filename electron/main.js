@@ -207,8 +207,8 @@ function waitForBackend(retries = 40, interval = 500) {
 
 // ── Main window ───────────────────────────────────────────────────────────────
 
-function createMainWindow() {
-  mainWindow = new BrowserWindow({
+function createMainWindow(url) {
+  const win = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 960,
@@ -224,17 +224,24 @@ function createMainWindow() {
     show: false,
   })
 
-  mainWindow.loadURL('http://localhost:8765')
+  win.loadURL(url || 'http://localhost:8765')
 
-  mainWindow.once('ready-to-show', () => {
+  win.once('ready-to-show', () => {
     closeLoading()
-    mainWindow.show()
-    mainWindow.focus()
+    win.show()
+    win.focus()
     // Check for app updates silently
     if (app.isPackaged && autoUpdater) autoUpdater.checkForUpdatesAndNotify()
   })
 
-  mainWindow.on('closed', () => { mainWindow = null })
+  win.on('closed', () => {
+    if (win === mainWindow) mainWindow = null
+  })
+
+  // Track the first window as mainWindow
+  if (!mainWindow) mainWindow = win
+
+  return win
 }
 
 // ── Auto updater ──────────────────────────────────────────────────────────────
@@ -270,6 +277,12 @@ ipcMain.handle('open-folder', async () => {
   return result.canceled ? null : result.filePaths[0]
 })
 
+ipcMain.handle('open-in-new-window', async (_event, folderPath) => {
+  const pid = Buffer.from(folderPath).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 32)
+  const url = `http://localhost:8765?root=${encodeURIComponent(folderPath)}&pid=${pid}`
+  createMainWindow(url)
+})
+
 // ── Application menu ─────────────────────────────────────────────────────
 
 function buildMenu() {
@@ -282,8 +295,11 @@ function buildMenu() {
           accelerator: 'CmdOrCtrl+O',
           click: async () => {
             const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
-            if (!result.canceled && result.filePaths[0] && mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('project-opened', result.filePaths[0])
+            if (!result.canceled && result.filePaths[0]) {
+              const folderPath = result.filePaths[0]
+              const pid = Buffer.from(folderPath).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 32)
+              const url = `http://localhost:8765?root=${encodeURIComponent(folderPath)}&pid=${pid}`
+              createMainWindow(url)
             }
           },
         },
@@ -318,6 +334,7 @@ function buildMenu() {
         { role: 'toggleDevTools' },
         { type: 'separator' },
         { role: 'togglefullscreen' },
+        { label: 'Exit Full Screen', accelerator: 'Escape', click: () => { if (mainWindow && mainWindow.isFullScreen()) mainWindow.setFullScreen(false) } },
       ],
     },
   ]

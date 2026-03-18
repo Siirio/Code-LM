@@ -3,6 +3,7 @@ import {
   chatStream,
   createSession,
   deleteSession,
+  fetchFileTree,
   getMessages,
   getProjectStatus,
   listSessions,
@@ -21,7 +22,7 @@ declare global {
     electron?: {
       platform: string
       openFolder: () => Promise<string | null>
-      onProjectOpened: (cb: (path: string) => void) => void
+      openInNewWindow: (path: string) => Promise<void>
     }
   }
 }
@@ -89,18 +90,6 @@ export default function App() {
   const [setupDone, setSetupDone] = useState(Boolean(projectId && rootPath))
   const [setupRoot, setSetupRoot] = useState('')
 
-  // Listen for project-opened from Electron menu
-  useEffect(() => {
-    if (window.electron?.onProjectOpened) {
-      window.electron.onProjectOpened((path: string) => {
-        const pid = btoa(path).replace(/[^a-zA-Z0-9]/g, '').slice(0, 32)
-        localStorage.setItem('codelm_root', path)
-        localStorage.setItem('codelm_pid', pid)
-        window.location.search = `?root=${encodeURIComponent(path)}&pid=${pid}`
-      })
-    }
-  }, [])
-
   function commitSetup(root: string) {
     const pid = btoa(root).replace(/[^a-zA-Z0-9]/g, '').slice(0, 32)
     localStorage.setItem('codelm_root', root)
@@ -120,8 +109,10 @@ export default function App() {
   if (!setupDone) {
     return (
       <div className="setup-screen">
-        <h1>Code LM</h1>
-        <p>Enter the absolute path to your project root:</p>
+        <div className="setup-logo">Code LM</div>
+        <div className="setup-headline">AI that knows your project. Not just your files.</div>
+        <div className="setup-subheading">Ship with confidence. Code LM knows your project the way a senior engineer does — and keeps that knowledge across every session, every feature, every change.</div>
+        <p className="setup-label">Open a project to get started:</p>
         <div className="setup-input-row">
           <input
             autoFocus
@@ -153,6 +144,91 @@ export default function App() {
   return <IDE projectId={projectId} rootPath={rootPath} />
 }
 
+// ── FileTreePanel ─────────────────────────────────────────────────────────────
+
+interface TreeNode {
+  name: string
+  path: string
+  type: 'file' | 'dir'
+  children: TreeNode[]
+}
+
+function FileTreePanel({ rootPath }: { rootPath: string }) {
+  const [tree, setTree] = useState<TreeNode | null>(null)
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    fetchFileTree(rootPath)
+      .then(t => { setTree(t); setExpanded(new Set([rootPath])) })
+      .catch(() => setError('Could not load files'))
+  }, [rootPath])
+
+  function toggle(path: string) {
+    setExpanded(prev => {
+      const next = new Set(prev)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }
+
+  function renderNode(node: TreeNode, depth: number): React.ReactNode {
+    const isOpen = expanded.has(node.path)
+    const indent = depth * 14
+
+    if (node.type === 'dir') {
+      return (
+        <div key={node.path}>
+          <div
+            className="tree-item tree-dir"
+            style={{ paddingLeft: `${8 + indent}px` }}
+            onClick={() => toggle(node.path)}
+          >
+            <span className="tree-arrow">{isOpen ? '\u25BE' : '\u25B8'}</span>
+            <span className="tree-icon">{'\uD83D\uDCC1'}</span>
+            <span className="tree-name">{node.name}</span>
+          </div>
+          {isOpen && node.children.map(child => renderNode(child, depth + 1))}
+        </div>
+      )
+    }
+
+    const ext = node.name.split('.').pop() || ''
+    const icon = ['ts','tsx','js','jsx'].includes(ext) ? '\u27E8\u27E9' :
+                 ['py'].includes(ext) ? '\uD83D\uDC0D' :
+                 ['java','kt'].includes(ext) ? '\u2615' :
+                 ['json','yml','yaml'].includes(ext) ? '{}' :
+                 ['md'].includes(ext) ? '\uD83D\uDCDD' : '\uD83D\uDCC4'
+
+    return (
+      <div
+        key={node.path}
+        className="tree-item tree-file"
+        style={{ paddingLeft: `${8 + indent}px` }}
+        title={node.path}
+      >
+        <span className="tree-icon-file">{icon}</span>
+        <span className="tree-name">{node.name}</span>
+      </div>
+    )
+  }
+
+  if (error) return <div className="tree-error">{error}</div>
+  if (!tree) return <div className="tree-loading">Loading...</div>
+
+  return (
+    <div className="file-tree">
+      <div className="tree-header">
+        <span className="tree-header-label">FILES</span>
+      </div>
+      <div className="tree-body">
+        {tree.children.map(child => renderNode(child, 0))}
+      </div>
+    </div>
+  )
+}
+
 // ── IDE ───────────────────────────────────────────────────────────────────────
 
 function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
@@ -174,6 +250,9 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   // Help modal
   const [showHelp, setShowHelp] = useState(false)
 
+  // Left panel tab
+  const [leftTab, setLeftTab] = useState<'chats' | 'files'>('chats')
+
   // Slash command autocomplete
   const [slashSuggestions, setSlashSuggestions] = useState<typeof SLASH_COMMANDS>([])
   const [selectedSuggestion, setSelectedSuggestion] = useState(0)
@@ -192,18 +271,6 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
     saveSettings(settings)
   }, [settings])
 
-  // Listen for project-opened from Electron menu
-  useEffect(() => {
-    if (window.electron?.onProjectOpened) {
-      window.electron.onProjectOpened((path: string) => {
-        const pid = btoa(path).replace(/[^a-zA-Z0-9]/g, '').slice(0, 32)
-        localStorage.setItem('codelm_root', path)
-        localStorage.setItem('codelm_pid', pid)
-        window.location.search = `?root=${encodeURIComponent(path)}&pid=${pid}`
-      })
-    }
-  }, [])
-
   // ── Startup ─────────────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -214,7 +281,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  async function checkBackend() {
+  async function checkBackend(attempt = 0) {
     try {
       const res = await fetch('/health')
       if (!res.ok) throw new Error()
@@ -227,10 +294,11 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
       }
       await loadSessions()
     } catch {
-      if (isElectron()) {
-        addSystem('Connecting to backend...')
+      if (isElectron() && attempt < 30) {
+        setTimeout(() => checkBackend(attempt + 1), 2000)
+        if (attempt === 0) addSystem('Connecting to backend...')
       } else {
-        addSystem('Backend not available. Start it: cd backend && python main.py')
+        addSystem(isElectron() ? 'Backend failed to start. Please restart the app.' : 'Backend not available. Start it: cd backend && python main.py')
       }
     }
   }
@@ -490,32 +558,42 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
 
   return (
     <div className="ide">
-      {/* Sidebar */}
-      <aside className="sidebar">
+      {/* Left panel */}
+      <aside className="left-panel">
         <div className="sidebar-header">
           <span className="logo">Code LM</span>
           <span className={`dot ${backendOk ? 'green' : 'red'}`} title={backendOk ? 'Backend connected' : 'Backend offline'} />
         </div>
 
-        <div className="sessions-label">Chats</div>
-        <div className="sessions-list">
-          {sessions.map(s => (
-            <div
-              key={s.id}
-              className={`session-item ${s.id === currentSessionId ? 'active' : ''}`}
-              onClick={() => switchSession(s.id)}
-            >
-              <span className="session-title">{s.title || 'New chat'}</span>
-              <button
-                className="delete-btn"
-                onClick={e => { e.stopPropagation(); removeSession(s.id) }}
-                title="Delete chat"
-              >&#10005;</button>
-            </div>
-          ))}
+        <div className="panel-tabs">
+          <button className={`panel-tab ${leftTab === 'files' ? 'active' : ''}`} onClick={() => setLeftTab('files')}>Files</button>
+          <button className={`panel-tab ${leftTab === 'chats' ? 'active' : ''}`} onClick={() => setLeftTab('chats')}>Chats</button>
         </div>
 
-        <button className="new-chat-btn" onClick={newSession}>+ New Chat</button>
+        {leftTab === 'files' && <FileTreePanel rootPath={rootPath} />}
+
+        {leftTab === 'chats' && (
+          <>
+            <div className="sessions-label">Chats</div>
+            <div className="sessions-list">
+              {sessions.map(s => (
+                <div
+                  key={s.id}
+                  className={`session-item ${s.id === currentSessionId ? 'active' : ''}`}
+                  onClick={() => switchSession(s.id)}
+                >
+                  <span className="session-title">{s.title || 'New chat'}</span>
+                  <button
+                    className="delete-btn"
+                    onClick={e => { e.stopPropagation(); removeSession(s.id) }}
+                    title="Delete chat"
+                  >&#10005;</button>
+                </div>
+              ))}
+            </div>
+            <button className="new-chat-btn" onClick={newSession}>+ New Chat</button>
+          </>
+        )}
       </aside>
 
       {/* Main chat area */}

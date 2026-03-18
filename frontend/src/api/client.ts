@@ -114,6 +114,14 @@ export async function createAgent(params: {
   return res.json()
 }
 
+// ── File tree ─────────────────────────────────────────────────────────────────
+
+export async function fetchFileTree(root: string): Promise<any> {
+  const r = await fetch(`${BASE}/files/tree?root=${encodeURIComponent(root)}`)
+  if (!r.ok) throw new Error(await r.text())
+  return r.json()
+}
+
 // ── Chat stream ───────────────────────────────────────────────────────────────
 
 export function chatStream(

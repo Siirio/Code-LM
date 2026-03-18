@@ -11,6 +11,39 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+@router.get("/tree")
+async def get_file_tree(root: str):
+    """Return directory tree for the given root path."""
+    SKIP = {"node_modules", "venv", ".venv", ".git", "__pycache__", "build", "dist", "target", ".idea", ".gradle", "out"}
+
+    def walk(path: str, depth: int = 0) -> dict | None:
+        if depth > 6:
+            return None
+        name = os.path.basename(path)
+        if name.startswith('.') and name not in {'.env'}:
+            return None
+        if os.path.isdir(path):
+            if name in SKIP:
+                return None
+            children = []
+            try:
+                for entry in sorted(os.scandir(path), key=lambda e: (not e.is_dir(), e.name.lower())):
+                    child = walk(entry.path, depth + 1)
+                    if child:
+                        children.append(child)
+            except PermissionError:
+                pass
+            return {"name": name, "path": path, "type": "dir", "children": children}
+        else:
+            return {"name": name, "path": path, "type": "file", "children": []}
+
+    if not root or not os.path.isdir(root):
+        raise HTTPException(status_code=400, detail="Invalid root path")
+
+    tree = walk(root)
+    return tree or {"name": os.path.basename(root), "path": root, "type": "dir", "children": []}
+
+
 class ApplyEditRequest(BaseModel):
     file_path: str
     description: str = ""
