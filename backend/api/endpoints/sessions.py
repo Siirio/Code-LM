@@ -1,8 +1,4 @@
-"""API endpoints for chat sessions and agent personas.
-
-Sessions provide persistent conversation history per project.
-Agent personas allow custom system prompt extensions.
-"""
+"""API endpoints for chat sessions and agent personas."""
 import logging
 
 from fastapi import APIRouter, HTTPException, Query
@@ -23,8 +19,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-# ── Request / Response schemas ────────────────────────────────────────────────
-
 class CreateSessionRequest(BaseModel):
     project_id: str
     agent_id: str | None = None
@@ -37,28 +31,35 @@ class CreatePersonaRequest(BaseModel):
     system_prompt_extra: str | None = None
 
 
+def _db_error(exc: Exception) -> HTTPException:
+    logger.error("DB error: %s", exc)
+    return HTTPException(status_code=503, detail="Database unavailable — check that Docker is running")
+
+
 # ── Session endpoints ─────────────────────────────────────────────────────────
 
 @router.post("")
 async def create_session_endpoint(request: CreateSessionRequest):
-    """Create a new chat session for a project."""
-    result = await create_session(
-        project_id=request.project_id,
-        agent_id=request.agent_id,
-    )
-    return result
+    try:
+        return await create_session(project_id=request.project_id, agent_id=request.agent_id)
+    except Exception as exc:
+        raise _db_error(exc)
 
 
 @router.get("")
 async def list_sessions_endpoint(project_id: str = Query(...)):
-    """List all chat sessions for a project, ordered by most recent."""
-    return await list_sessions(project_id)
+    try:
+        return await list_sessions(project_id)
+    except Exception:
+        return []
 
 
 @router.get("/{session_id}")
 async def get_session_endpoint(session_id: str):
-    """Get a single chat session by ID."""
-    result = await get_session(session_id)
+    try:
+        result = await get_session(session_id)
+    except Exception as exc:
+        raise _db_error(exc)
     if not result:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
     return result
@@ -66,8 +67,10 @@ async def get_session_endpoint(session_id: str):
 
 @router.delete("/{session_id}")
 async def delete_session_endpoint(session_id: str):
-    """Delete a chat session and all its messages."""
-    deleted = await delete_session(session_id)
+    try:
+        deleted = await delete_session(session_id)
+    except Exception as exc:
+        raise _db_error(exc)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
     return {"deleted": True, "session_id": session_id}
@@ -75,28 +78,35 @@ async def delete_session_endpoint(session_id: str):
 
 @router.get("/{session_id}/messages")
 async def get_messages_endpoint(session_id: str):
-    """Get all messages for a chat session."""
-    session = await get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
-    return await get_messages(session_id)
+    try:
+        session = await get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        return await get_messages(session_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _db_error(exc)
 
 
-# ── Agent persona endpoints ──────────────────────────────────────────────────
+# ── Agent persona endpoints ───────────────────────────────────────────────────
 
 @router.post("/agents")
 async def create_persona_endpoint(request: CreatePersonaRequest):
-    """Create a custom agent persona for a project."""
-    result = await create_persona(
-        project_id=request.project_id,
-        name=request.name,
-        description=request.description,
-        system_prompt_extra=request.system_prompt_extra,
-    )
-    return result
+    try:
+        return await create_persona(
+            project_id=request.project_id,
+            name=request.name,
+            description=request.description,
+            system_prompt_extra=request.system_prompt_extra,
+        )
+    except Exception as exc:
+        raise _db_error(exc)
 
 
 @router.get("/agents")
 async def list_personas_endpoint(project_id: str = Query(...)):
-    """List all agent personas for a project."""
-    return await list_personas(project_id)
+    try:
+        return await list_personas(project_id)
+    except Exception:
+        return []

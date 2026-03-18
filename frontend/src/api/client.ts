@@ -128,6 +128,7 @@ export async function scanProject(params: {
 
 export async function listSessions(projectId: string): Promise<Session[]> {
   const res = await fetch(`${BASE}/projects/${projectId}/sessions`)
+  if (!res.ok) return []
   return res.json()
 }
 
@@ -137,6 +138,10 @@ export async function createSession(projectId: string, agentId?: string): Promis
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ project_id: projectId, agent_id: agentId }),
   })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: 'Database unavailable' }))
+    throw new Error(body.detail || `HTTP ${res.status}`)
+  }
   return res.json()
 }
 

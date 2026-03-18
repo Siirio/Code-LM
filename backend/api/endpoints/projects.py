@@ -58,12 +58,18 @@ async def scan_project_endpoint(request: ScanRequest):
 
 @router.get("/{project_id}/sessions")
 async def project_sessions(project_id: str):
-    return await list_sessions(project_id)
+    try:
+        return await list_sessions(project_id)
+    except Exception:
+        return []
 
 
 @router.get("/{project_id}/agents")
 async def project_agents(project_id: str):
-    return await list_personas(project_id)
+    try:
+        return await list_personas(project_id)
+    except Exception:
+        return []
 
 
 @router.get("/{project_id}/status")
