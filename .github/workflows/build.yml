@@ -156,7 +156,10 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/**
+          files: |
+            dist/**/*.exe
+            dist/**/*.dmg
+            dist/**/*.AppImage
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
