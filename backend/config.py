@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     # ── PostgreSQL ────────────────────────────────────────────────────────────
     postgres_host: str = "localhost"
-    postgres_port: int = 5433
+    postgres_port: int = 54320
     postgres_db: str = "engramai"
     postgres_user: str = "engramai"
     postgres_password: str = "engramai"
@@ -37,13 +37,13 @@ class Settings(BaseSettings):
         )
 
     # ── Neo4j ─────────────────────────────────────────────────────────────────
-    neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_uri: str = "bolt://localhost:54321"
     neo4j_user: str = "neo4j"
     neo4j_password: str = "engramai"
 
     # ── Qdrant ────────────────────────────────────────────────────────────────
     qdrant_host: str = "localhost"
-    qdrant_port: int = 6333
+    qdrant_port: int = 54323
     qdrant_api_key: str = ""  # empty = no auth (local instance)
 
 
