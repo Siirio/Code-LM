@@ -209,8 +209,13 @@ async def add_rule(project_id: str, name: str, description: str, severity: str =
 # ── Chat Sessions ─────────────────────────────────────────────────────────────
 
 async def create_session(project_id: str, agent_id: str | None = None) -> dict:
-    """Create a new chat session for the given project."""
+    """Create a new chat session for the given project, auto-creating the project record if needed."""
     async with get_pg_session() as session:
+        # Ensure project row exists (foreign key requirement)
+        result = await session.execute(select(Project).where(Project.id == project_id))
+        if not result.scalar_one_or_none():
+            session.add(Project(id=project_id, name=project_id, root_path=""))
+
         chat_session = ChatSession(project_id=project_id, agent_id=agent_id)
         session.add(chat_session)
         await session.flush()
