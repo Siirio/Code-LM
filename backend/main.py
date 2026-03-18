@@ -79,13 +79,13 @@ app.include_router(router, prefix="/api/v1")
 
 # Serve built React frontend from backend/static/
 _static_dir = os.path.join(os.path.dirname(__file__), "static")
-if os.path.isdir(_static_dir):
-    app.mount("/assets", StaticFiles(directory=os.path.join(_static_dir, "assets")), name="assets")
+_assets_dir = os.path.join(_static_dir, "assets")
+if os.path.isdir(_static_dir) and os.path.isdir(_assets_dir):
+    app.mount("/assets", StaticFiles(directory=_assets_dir), name="assets")
 
     @app.get("/", include_in_schema=False)
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str = ""):
-        # API routes take priority (handled above); this catches everything else
         if full_path.startswith("api/"):
             from fastapi import HTTPException
             raise HTTPException(status_code=404)
