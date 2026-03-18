@@ -97,12 +97,12 @@ function dockerComposeUp() {
   return new Promise((resolve, reject) => {
     const composePath = dockerComposePath()
     // Try docker compose (v2) first, fall back to docker-compose (v1)
-    const cmd = process.platform === 'win32' ? 'docker' : 'docker'
-    const args = ['compose', '-f', composePath, 'up', '-d']
+    const cmd = 'docker'
+    const args = ['compose', '-p', 'engramai', '-f', composePath, 'up', '-d']
     const proc = execFile(cmd, args, { timeout: 60000 }, (err, stdout, stderr) => {
       if (err) {
         // Try legacy docker-compose
-        execFile('docker-compose', ['-f', composePath, 'up', '-d'], { timeout: 60000 }, (err2, stdout2, stderr2) => {
+        execFile('docker-compose', ['-p', 'engramai', '-f', composePath, 'up', '-d'], { timeout: 60000 }, (err2, stdout2, stderr2) => {
           if (err2) reject(new Error(`docker compose: ${stderr || err.message}\ndocker-compose: ${stderr2 || err2.message}\ncompose file: ${composePath}`))
           else resolve()
         })
