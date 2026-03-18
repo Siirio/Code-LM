@@ -1,24 +1,31 @@
-"""WebSocket terminal endpoint — PTY-backed shell sessions."""
-import asyncio
-import fcntl
+"""WebSocket terminal endpoint — PTY-backed shell sessions (Linux/macOS only)."""
 import json
 import logging
 import os
-import pty
-import select as sel
 import shutil
-import struct
-import subprocess
-import termios
-import threading
+import sys
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+# Unix-only modules — not available on Windows
+_UNIX = sys.platform != 'win32'
+if _UNIX:
+    import asyncio
+    import fcntl
+    import pty
+    import select as sel
+    import struct
+    import subprocess
+    import termios
+    import threading
+
 
 def _available_shells() -> list[str]:
+    if not _UNIX:
+        return []
     found = []
     for sh in ['bash', 'zsh', 'fish', 'sh']:
         if shutil.which(sh):
@@ -37,12 +44,20 @@ def _set_pty_size(fd: int, rows: int, cols: int) -> None:
 @router.get("/shells")
 async def list_shells():
     shells = _available_shells()
-    return {"shells": shells, "default": shells[0]}
+    return {"shells": shells, "default": shells[0] if shells else None, "available": _UNIX}
 
 
 @router.websocket("/ws")
 async def terminal_ws(websocket: WebSocket, shell: str = ""):
     await websocket.accept()
+
+    if not _UNIX:
+        await websocket.send_bytes(
+            b"\r\nTerminal is not available on Windows in this build.\r\n"
+            b"Run the backend on Linux/WSL to use the terminal.\r\n"
+        )
+        await websocket.close()
+        return
 
     available = _available_shells()
     if not shell or shell not in available:
