@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from api.endpoints import chat, projects, memory, graph, sessions, files
+from api.endpoints import chat, projects, memory, graph, sessions, files, terminal
 
 router = APIRouter()
 
@@ -10,6 +10,7 @@ router.include_router(memory.router, prefix="/memory", tags=["memory"])
 router.include_router(graph.router, prefix="/graph", tags=["graph"])
 router.include_router(sessions.router, prefix="/sessions", tags=["sessions"])
 router.include_router(files.router, prefix="/files", tags=["files"])
+router.include_router(terminal.router, prefix="/terminal", tags=["terminal"])
 
 # Top-level /agents alias — matches POST /api/v1/agents used by IntelliJ client
 _agents_alias = APIRouter()

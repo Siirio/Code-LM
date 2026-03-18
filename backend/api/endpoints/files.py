@@ -4,7 +4,7 @@ import logging
 import os
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from scanner.project_scanner import _resolve_path
 
@@ -127,3 +127,21 @@ async def get_file_content(path: str):
         return {"type": "text", "content": content, "size": size, "ext": ext.lstrip('.')}
     except Exception:
         return {"type": "binary", "content": "", "size": size, "ext": ext.lstrip('.')}
+
+
+class SaveContentRequest(BaseModel):
+    content: str
+
+
+@router.put("/content")
+async def save_file_content(path: str, body: SaveContentRequest):
+    """Overwrite a text file (IDE auto-save)."""
+    resolved = _resolve_path(path)
+    if not os.path.isfile(resolved):
+        raise HTTPException(status_code=404, detail="File not found")
+    try:
+        with open(resolved, 'w', encoding='utf-8') as f:
+            f.write(body.content)
+        return {"status": "ok"}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
