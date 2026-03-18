@@ -1,4 +1,5 @@
-"""File write endpoint — applies AI-proposed edits after user approval in the IDE."""
+"""File endpoints — tree, content read, and AI-proposed edit apply."""
+import base64
 import logging
 import os
 
@@ -89,3 +90,40 @@ async def apply_edit(request: ApplyEditRequest):
     except Exception as exc:
         logger.exception("apply_edit: failed for %s", file_path)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+_IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico', '.bmp'}
+_IMAGE_MIME = {
+    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif', '.svg': 'image/svg+xml', '.webp': 'image/webp',
+    '.ico': 'image/x-icon', '.bmp': 'image/bmp',
+}
+
+
+@router.get("/content")
+async def get_file_content(path: str):
+    """Return file content for the IDE viewer. Handles text, images, and binary."""
+    resolved = _resolve_path(path)
+    if not os.path.isfile(resolved):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    ext = os.path.splitext(resolved)[1].lower()
+    size = os.path.getsize(resolved)
+
+    if ext in _IMAGE_EXTS:
+        with open(resolved, 'rb') as f:
+            data = f.read()
+        return {
+            "type": "image",
+            "content": base64.b64encode(data).decode(),
+            "mime": _IMAGE_MIME.get(ext, 'application/octet-stream'),
+            "size": size,
+            "ext": ext.lstrip('.'),
+        }
+
+    try:
+        with open(resolved, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read(500_000)  # cap at 500 KB
+        return {"type": "text", "content": content, "size": size, "ext": ext.lstrip('.')}
+    except Exception:
+        return {"type": "binary", "content": "", "size": size, "ext": ext.lstrip('.')}

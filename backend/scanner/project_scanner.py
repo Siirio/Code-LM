@@ -56,12 +56,14 @@ def _classify_layer(name: str) -> str:
 
 
 def _resolve_path(root_path: str) -> str:
-    """Convert Windows drive paths to WSL mount paths when running under WSL.
-    e.g. C:/Users/foo  →  /mnt/c/Users/foo
-         D:\\Projects   →  /mnt/d/Projects
-    Non-Windows paths are returned unchanged.
+    """Convert Windows drive paths to WSL mount paths — only when running on Linux.
+    e.g. C:/Users/foo  →  /mnt/c/Users/foo   (Linux/WSL only)
+         D:\\Projects   →  /mnt/d/Projects    (Linux/WSL only)
+    On Windows/macOS paths are returned unchanged.
     """
-    import re
+    import sys, re
+    if sys.platform != "linux":
+        return root_path  # on Windows the path is already valid
     match = re.match(r'^([A-Za-z])[:/\\]+(.*)', root_path)
     if match:
         drive = match.group(1).lower()

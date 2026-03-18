@@ -5,6 +5,7 @@ import {
   createSession,
   deductCredit,
   deleteSession,
+  fetchFileContent,
   fetchFileTree,
   getMessages,
   getProjectStatus,
@@ -21,6 +22,7 @@ import {
   type Session,
 } from './api/client'
 import DiffDialog from './components/DiffDialog'
+import FileContentPanel, { type OpenFile } from './components/FileContentPanel'
 import './index.css'
 
 // ── Electron typings ─────────────────────────────────────────────────────────
@@ -56,12 +58,14 @@ interface DisplayMessage {
 
 interface CodeLMSettings {
   fontSize: number
-  interfaceScale: 'compact' | 'normal' | 'comfortable'
+  uiScale: number  // 1–6, where 4 = 100% (default)
 }
+
+const SCALE_ZOOM = [0, 0.65, 0.75, 0.85, 1.0, 1.15, 1.35] // index 0 unused
 
 const DEFAULT_SETTINGS: CodeLMSettings = {
   fontSize: 14,
-  interfaceScale: 'normal',
+  uiScale: 4,
 }
 
 function loadSettings(): CodeLMSettings {
@@ -161,7 +165,7 @@ interface TreeNode {
   children: TreeNode[]
 }
 
-function FileTreePanel({ rootPath }: { rootPath: string }) {
+function FileTreePanel({ rootPath, onFileOpen }: { rootPath: string; onFileOpen?: (path: string) => void }) {
   const [tree, setTree] = useState<TreeNode | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [error, setError] = useState('')
@@ -215,6 +219,7 @@ function FileTreePanel({ rootPath }: { rootPath: string }) {
         className="tree-item tree-file"
         style={{ paddingLeft: `${8 + indent}px` }}
         title={node.path}
+        onClick={() => onFileOpen?.(node.path)}
       >
         <span className="tree-icon-file">{icon}</span>
         <span className="tree-name">{node.name}</span>
@@ -258,6 +263,15 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   // Help modal
   const [showHelp, setShowHelp] = useState(false)
 
+  // File viewer
+  const [openFile, setOpenFile] = useState<OpenFile | null>(null)
+
+  // Window title
+  const projectName = rootPath.split(/[/\\]/).filter(Boolean).pop() || 'Code LM'
+  useEffect(() => {
+    document.title = `${projectName} — Code LM`
+  }, [projectName])
+
   // Auth: own key OR credits
   const [auth, setAuth] = useState<AuthConfig | null>(loadAuth)
   const [showAuth, setShowAuth] = useState(false)
@@ -277,10 +291,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   // Apply settings to CSS
   useEffect(() => {
     document.documentElement.style.setProperty('--font-size', `${settings.fontSize}px`)
-    document.documentElement.classList.remove('compact', 'comfortable')
-    if (settings.interfaceScale !== 'normal') {
-      document.documentElement.classList.add(settings.interfaceScale)
-    }
+    document.documentElement.style.setProperty('--ui-zoom', String(SCALE_ZOOM[settings.uiScale] ?? 1.0))
     saveSettings(settings)
   }, [settings])
 
@@ -386,6 +397,17 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
     } finally {
       setScanBusy(false)
       setStatusLine('')
+    }
+  }
+
+  // ── File open ─────────────────────────────────────────────────────────────
+
+  async function handleFileOpen(path: string) {
+    try {
+      const data = await fetchFileContent(path)
+      setOpenFile({ path, ...data })
+    } catch (e) {
+      addSystem(`Could not open file: ${e}`)
     }
   }
 
@@ -579,7 +601,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="ide">
+    <div className={`ide${openFile ? ' ide-three-panel' : ''}`}>
       {/* Left panel */}
       <aside className="left-panel">
         <div className="sidebar-header">
@@ -592,7 +614,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
           <button className={`panel-tab ${leftTab === 'chats' ? 'active' : ''}`} onClick={() => setLeftTab('chats')}>Chats</button>
         </div>
 
-        {leftTab === 'files' && <FileTreePanel rootPath={rootPath} />}
+        {leftTab === 'files' && <FileTreePanel rootPath={rootPath} onFileOpen={handleFileOpen} />}
 
         {leftTab === 'chats' && (
           <>
@@ -618,11 +640,16 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
         )}
       </aside>
 
+      {/* File content panel (middle) */}
+      {openFile && (
+        <FileContentPanel file={openFile} onClose={() => setOpenFile(null)} />
+      )}
+
       {/* Main chat area */}
       <main className="chat-area">
         {/* Toolbar */}
         <div className="toolbar">
-          <div className="toolbar-title">Code LM</div>
+          <div className="toolbar-title">{projectName}</div>
           <div className="toolbar-actions">
             {auth?.apiKey ? (
               <div className="auth-indicator" onClick={() => setShowAuth(true)} title="API Key connected">
@@ -705,15 +732,15 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
                 />
               </div>
               <div className="setting-row">
-                <label>Interface Scale</label>
+                <label>Interface Scale: {Math.round((SCALE_ZOOM[settings.uiScale] ?? 1) * 100)}%</label>
                 <div className="scale-options">
-                  {(['compact', 'normal', 'comfortable'] as const).map(scale => (
+                  {[1, 2, 3, 4, 5, 6].map(n => (
                     <button
-                      key={scale}
-                      className={`scale-btn ${settings.interfaceScale === scale ? 'scale-btn-active' : ''}`}
-                      onClick={() => setSettings(s => ({ ...s, interfaceScale: scale }))}
+                      key={n}
+                      className={`scale-btn ${settings.uiScale === n ? 'scale-btn-active' : ''}`}
+                      onClick={() => setSettings(s => ({ ...s, uiScale: n }))}
                     >
-                      {scale.charAt(0).toUpperCase() + scale.slice(1)}
+                      {n}
                     </button>
                   ))}
                 </div>
