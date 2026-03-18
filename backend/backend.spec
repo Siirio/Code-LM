@@ -65,8 +65,7 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # Exclude heavy unused packages
-        'matplotlib', 'numpy', 'pandas', 'PIL', 'tkinter',
+        'matplotlib', 'pandas', 'PIL', 'tkinter',
         'test', 'tests', 'unittest',
     ],
     win_no_prefer_redirects=False,
