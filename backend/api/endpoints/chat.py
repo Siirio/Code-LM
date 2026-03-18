@@ -1,12 +1,11 @@
 import logging
 
 import anthropic
-import google.api_core.exceptions
-import openai
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from config import settings
 from orchestrator.orchestrator import chat as orchestrator_chat
 from orchestrator.orchestrator import chat_stream as orchestrator_chat_stream
 
@@ -30,12 +29,15 @@ class ChatResponse(BaseModel):
     memory_update_proposal: dict | None = None
 
 
+def _resolve_key(user_key: str) -> str:
+    """Use the user's own key if provided, otherwise fall back to the backend's .env key."""
+    return user_key.strip() or settings.anthropic_api_key
+
+
 @router.post("", response_model=ChatResponse)
 async def chat(
     request: ChatRequest,
     x_api_key: str = Header(default="", alias="X-Api-Key"),
-    x_provider: str = Header(default="anthropic", alias="X-Provider"),
-    x_model: str = Header(default="", alias="X-Model"),
 ):
     try:
         result = await orchestrator_chat(
@@ -44,23 +46,20 @@ async def chat(
             conversation_id=request.conversation_id,
             session_id=request.session_id,
             agent_id=request.agent_id,
-            api_key=x_api_key,
-            provider_name=x_provider,
-            model=x_model or None,
+            api_key=_resolve_key(x_api_key),
+            provider_name="anthropic",
+            model=settings.llm_model or None,
         )
         return ChatResponse(**result)
 
     except anthropic.AuthenticationError as e:
-        # Invalid or missing API key — 401 so the plugin can surface a clear message
         logger.error("Anthropic authentication error: %s", e)
         raise HTTPException(
             status_code=401,
-            detail="Anthropic API key is invalid or missing. Check ANTHROPIC_API_KEY in your .env file.",
+            detail="Anthropic API key is invalid or missing.",
         )
 
     except anthropic.BadRequestError as e:
-        # 400 from Anthropic — most common cause: insufficient credits or bad request payload.
-        # Parse out the human-readable message from the structured error body when possible.
         logger.error("Anthropic bad request: %s", e)
         try:
             user_message = e.body["error"]["message"]  # type: ignore[index]
@@ -76,47 +75,13 @@ async def chat(
         )
 
     except anthropic.APIStatusError as e:
-        # Catch-all for other Anthropic HTTP errors (e.g. 529 overloaded)
         logger.error("Anthropic API error (status %s): %s", e.status_code, e)
         raise HTTPException(
             status_code=502,
             detail=f"Anthropic API returned an error ({e.status_code}). Please try again.",
         )
 
-    except openai.AuthenticationError:
-        logger.error("OpenAI authentication error")
-        raise HTTPException(
-            status_code=401,
-            detail="OpenAI API key is invalid or missing. Check OPENAI_API_KEY in your .env file.",
-        )
-
-    except openai.RateLimitError:
-        logger.warning("OpenAI rate limit hit")
-        raise HTTPException(
-            status_code=429,
-            detail="OpenAI API rate limit reached. Please wait a moment and try again.",
-        )
-
-    except openai.APIStatusError as e:
-        logger.error("OpenAI API error (status %s): %s", e.status_code, e)
-        raise HTTPException(
-            status_code=502,
-            detail=f"OpenAI API returned an error ({e.status_code}). Please try again.",
-        )
-
-    except google.api_core.exceptions.ResourceExhausted as e:
-        # Gemini free-tier quota exhausted (HTTP 429 from Google).
-        logger.warning("Gemini ResourceExhausted (quota exceeded): %s", e)
-        raise HTTPException(
-            status_code=429,
-            detail=(
-                "Gemini API quota exceeded. Try switching LLM_PROVIDER=anthropic in .env "
-                "or upgrade your Google AI plan."
-            ),
-        )
-
     except Exception as e:
-        # Unexpected errors: log the full traceback server-side, return a safe message
         logger.exception("Unexpected error in chat endpoint")
         raise HTTPException(
             status_code=500,
@@ -128,8 +93,6 @@ async def chat(
 async def chat_stream(
     request: ChatRequest,
     x_api_key: str = Header(default="", alias="X-Api-Key"),
-    x_provider: str = Header(default="anthropic", alias="X-Provider"),
-    x_model: str = Header(default="", alias="X-Model"),
 ):
     """Stream chat responses as Server-Sent Events.
 
@@ -145,9 +108,9 @@ async def chat_stream(
             conversation_id=request.conversation_id,
             session_id=request.session_id,
             agent_id=request.agent_id,
-            api_key=x_api_key,
-            provider_name=x_provider,
-            model=x_model or None,
+            api_key=_resolve_key(x_api_key),
+            provider_name="anthropic",
+            model=settings.llm_model or None,
         ),
         media_type="text/event-stream",
         headers={

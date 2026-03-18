@@ -258,11 +258,9 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   // Help modal
   const [showHelp, setShowHelp] = useState(false)
 
-  // Auth
+  // Auth: own key OR credits
   const [auth, setAuth] = useState<AuthConfig | null>(loadAuth)
   const [showAuth, setShowAuth] = useState(false)
-
-  // Credits
   const [credits, setCredits] = useState<CreditsConfig>(loadCredits)
 
   // Left panel tab
@@ -449,24 +447,13 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   async function send() {
     if (busy || !input.trim()) return
 
-    // Credits mode: no API key but has credits balance
-    if (!auth || !auth.apiKey) {
-      if (credits.balance > 0 && credits.plan === 'paid') {
-        // Deduct credit and show mock response
-        if (!deductCredit()) {
-          setShowAuth(true)
-          return
-        }
-        setCredits(loadCredits())
-        const mockMsg = input.trim()
-        setInput('')
-        setSlashSuggestions([])
-        addMessage('user', mockMsg)
-        addMessage('assistant', '[Credits mode] This feature is coming soon. Add your API key to start chatting now.')
+    // Gate: need either own API key or credits
+    if (!auth?.apiKey) {
+      if (!deductCredit()) {
+        setShowAuth(true)
         return
       }
-      setShowAuth(true)
-      return
+      setCredits(loadCredits())
     }
     let msg = input.trim()
     setInput('')
@@ -637,16 +624,17 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
         <div className="toolbar">
           <div className="toolbar-title">Code LM</div>
           <div className="toolbar-actions">
-            {!auth && (
+            {auth?.apiKey ? (
+              <div className="auth-indicator" onClick={() => setShowAuth(true)} title="API Key connected">
+                <span className="auth-dot connected" />
+                <span className="auth-label">My Key</span>
+              </div>
+            ) : (
               <div className="credits-indicator" onClick={() => setShowAuth(true)} title="Credits balance">
                 <span className="credits-icon">{'\uD83D\uDCB3'}</span>
                 <span className="credits-label">{credits.balance} cr</span>
               </div>
             )}
-            <div className="auth-indicator" onClick={() => setShowAuth(true)} title={auth ? `${auth.provider} connected` : 'No API key'}>
-              <span className={`auth-dot ${auth ? 'connected' : 'disconnected'}`} />
-              <span className="auth-label">{auth ? auth.provider : 'Connect'}</span>
-            </div>
             <button className="toolbar-btn" onClick={() => setShowHelp(true)} title="Help">?</button>
             <button className="toolbar-btn" onClick={() => setShowSettings(true)} title="Settings">&#9881;</button>
           </div>
@@ -781,21 +769,12 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
       {/* Auth modal */}
       {showAuth && (
         <AuthModal
-          initial={auth}
-          onSave={(config) => {
-            saveAuth(config)
-            setAuth(config)
-            setShowAuth(false)
-          }}
-          onDisconnect={() => {
-            clearAuth()
-            setAuth(null)
-            setShowAuth(false)
-          }}
-          hasExisting={Boolean(auth)}
+          auth={auth}
+          onSaveKey={(config) => { saveAuth(config); setAuth(config); setShowAuth(false) }}
+          onDisconnect={() => { clearAuth(); setAuth(null); setShowAuth(false) }}
           credits={credits}
           onCreditsChange={(c) => { saveCredits(c); setCredits(c) }}
-          onStartCredits={() => setShowAuth(false)}
+          onClose={() => setShowAuth(false)}
         />
       )}
 
@@ -846,43 +825,26 @@ function MessageBubble({ message }: { message: DisplayMessage }) {
 
 // ── AuthModal ─────────────────────────────────────────────────────────────────
 
-const PROVIDER_PLACEHOLDERS: Record<string, string> = {
-  anthropic: 'sk-ant-...',
-  openai: 'sk-...',
-  gemini: 'AIza...',
-}
-
-const PROVIDER_LINKS: Record<string, string> = {
-  anthropic: 'https://console.anthropic.com',
-  openai: 'https://platform.openai.com/api-keys',
-  gemini: 'https://aistudio.google.com/app/apikey',
-}
-
 function AuthModal({
-  initial,
-  onSave,
+  auth,
+  onSaveKey,
   onDisconnect,
-  hasExisting,
   credits,
   onCreditsChange,
-  onStartCredits,
+  onClose,
 }: {
-  initial: AuthConfig | null
-  onSave: (config: AuthConfig) => void
+  auth: AuthConfig | null
+  onSaveKey: (config: AuthConfig) => void
   onDisconnect: () => void
-  hasExisting: boolean
   credits: CreditsConfig
   onCreditsChange: (c: CreditsConfig) => void
-  onStartCredits: () => void
+  onClose: () => void
 }) {
-  const [provider, setProvider] = useState<AuthConfig['provider']>(initial?.provider || 'anthropic')
-  const [apiKey, setApiKey] = useState(initial?.apiKey || '')
-  const [model, setModel] = useState(initial?.model || '')
-  const [showAdvanced, setShowAdvanced] = useState(Boolean(initial?.model))
-  const [authTab, setAuthTab] = useState<'key' | 'credits'>('key')
+  const [tab, setTab] = useState<'key' | 'credits'>(auth?.apiKey ? 'key' : 'credits')
+  const [apiKey, setApiKey] = useState(auth?.apiKey || '')
 
   const purchaseCredits = (amount: number) => {
-    onCreditsChange({ balance: credits.balance + amount, plan: 'paid' })
+    onCreditsChange({ balance: credits.balance + amount })
   }
 
   return (
@@ -890,105 +852,66 @@ function AuthModal({
       <div className="modal auth-modal" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <span className="modal-title">Connect your AI</span>
-          {hasExisting && (
-            <button className="modal-close" onClick={onDisconnect} title="Disconnect">&#10005;</button>
-          )}
+          <button className="modal-close" onClick={onClose} title="Close">&#10005;</button>
         </div>
 
         <div className="auth-tabs">
-          <button
-            className={`auth-tab ${authTab === 'key' ? 'active' : ''}`}
-            onClick={() => setAuthTab('key')}
-          >
-            API Key
+          <button className={`auth-tab ${tab === 'key' ? 'active' : ''}`} onClick={() => setTab('key')}>
+            My API Key
           </button>
-          <button
-            className={`auth-tab ${authTab === 'credits' ? 'active' : ''}`}
-            onClick={() => setAuthTab('credits')}
-          >
+          <button className={`auth-tab ${tab === 'credits' ? 'active' : ''}`} onClick={() => setTab('credits')}>
             Code LM Credits
           </button>
         </div>
 
         <div className="modal-body">
-          {authTab === 'key' && (
+          {tab === 'key' && (
             <>
               <p style={{ fontSize: '12px', color: 'var(--text-dim)', marginBottom: '16px' }}>
-                Enter your API key to start using Code LM
+                Use your own Anthropic (Claude) API key. No credits needed.
               </p>
-
-              <div className="auth-provider-row">
-                {(['anthropic', 'openai', 'gemini'] as const).map(p => (
-                  <button
-                    key={p}
-                    className={`auth-provider-btn ${provider === p ? 'active' : ''}`}
-                    onClick={() => setProvider(p)}
-                  >
-                    {p.charAt(0).toUpperCase() + p.slice(1)}
-                  </button>
-                ))}
-              </div>
-
               <input
                 type="password"
                 className="auth-input"
-                placeholder={PROVIDER_PLACEHOLDERS[provider]}
+                placeholder="sk-ant-..."
                 value={apiKey}
                 onChange={e => setApiKey(e.target.value)}
                 autoFocus
               />
-
               <a
                 className="auth-link"
-                href={PROVIDER_LINKS[provider]}
+                href="https://console.anthropic.com"
                 target="_blank"
                 rel="noopener noreferrer"
               >
-                Get your API key &rarr;
+                Get your Anthropic API key &rarr;
               </a>
-
-              <button
-                className="auth-advanced-toggle"
-                onClick={() => setShowAdvanced(!showAdvanced)}
-              >
-                {showAdvanced ? '- Advanced' : '+ Advanced'}
-              </button>
-
-              {showAdvanced && (
-                <input
-                  className="auth-input"
-                  placeholder="Custom model name (optional)"
-                  value={model}
-                  onChange={e => setModel(e.target.value)}
-                />
-              )}
-
-              <button
-                className="auth-connect-btn"
-                disabled={!apiKey.trim()}
-                onClick={() =>
-                  onSave({
-                    provider,
-                    apiKey: apiKey.trim(),
-                    ...(model.trim() ? { model: model.trim() } : {}),
-                  })
-                }
-              >
-                Connect
-              </button>
+              <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
+                <button
+                  className="auth-connect-btn"
+                  disabled={!apiKey.trim()}
+                  onClick={() => onSaveKey({ apiKey: apiKey.trim() })}
+                >
+                  {auth?.apiKey ? 'Update Key' : 'Connect'}
+                </button>
+                {auth?.apiKey && (
+                  <button className="auth-connect-btn" style={{ background: '#555' }} onClick={onDisconnect}>
+                    Disconnect
+                  </button>
+                )}
+              </div>
             </>
           )}
 
-          {authTab === 'credits' && (
+          {tab === 'credits' && (
             <>
               <div className="credits-balance">
                 <div className="credits-amount">{'\uD83D\uDCB3'} {credits.balance}</div>
                 <div className="credits-unit">credits</div>
                 <div className={`credits-status ${credits.balance > 0 ? 'ok' : 'empty'}`}>
-                  {credits.balance > 0 ? 'Credits active' : 'No credits'}
+                  {credits.balance > 0 ? 'Credits active' : 'No credits — top up to start chatting'}
                 </div>
               </div>
-
               <div className="credits-plans">
                 <button className="credits-plan-btn" onClick={() => purchaseCredits(500)}>
                   <span className="plan-price">$5</span>
@@ -1003,15 +926,13 @@ function AuthModal({
                   <span className="plan-credits">3,500 credits</span>
                 </button>
               </div>
-
               <div className="credits-note">
                 Credits are consumed per message. 1 message = 2 credits.
               </div>
-
               <button
                 className="credits-start-btn"
                 disabled={credits.balance <= 0}
-                onClick={onStartCredits}
+                onClick={onClose}
               >
                 Start chatting {'\u2192'}
               </button>

@@ -15,6 +15,13 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8765
 
+    # ── LLM API keys (set in .env on the server — users never see these) ──────
+    anthropic_api_key: str = ""
+    openai_api_key: str = ""
+    gemini_api_key: str = ""
+    llm_provider: str = "anthropic"  # default provider
+    llm_model: str = ""              # empty = use provider default
+
     # ── PostgreSQL ────────────────────────────────────────────────────────────
     postgres_host: str = "localhost"
     postgres_port: int = 5432

@@ -1,11 +1,9 @@
 const BASE = '/api/v1'
 
-// ── Auth config (per-user API key) ───────────────────────────────────────────
+// ── Auth config (user's own Anthropic key — optional) ────────────────────────
 
 export interface AuthConfig {
-  provider: 'anthropic' | 'openai' | 'gemini'
   apiKey: string
-  model?: string
 }
 
 export function loadAuth(): AuthConfig | null {
@@ -24,22 +22,21 @@ export function clearAuth() {
   localStorage.removeItem('codelm_auth')
 }
 
-// ── Credits config (pay-per-message concept) ─────────────────────────────────
+// ── Credits config (pay-per-message) ─────────────────────────────────────────
 
 export interface CreditsConfig {
-  balance: number       // remaining credits
-  plan: 'free' | 'paid'
+  balance: number
 }
 
 const CREDITS_KEY = 'codelm_credits'
-const COST_PER_MESSAGE = 2  // mock: each message costs 2 credits
+const COST_PER_MESSAGE = 2
 
 export function loadCredits(): CreditsConfig {
   try {
     const raw = localStorage.getItem(CREDITS_KEY)
     if (raw) return JSON.parse(raw)
   } catch {}
-  return { balance: 0, plan: 'free' }
+  return { balance: 0 }
 }
 
 export function saveCredits(c: CreditsConfig) {
@@ -48,20 +45,15 @@ export function saveCredits(c: CreditsConfig) {
 
 export function deductCredit(): boolean {
   const c = loadCredits()
-  if (c.plan === 'free') return true  // API key users: no deduction
-  if (c.balance <= 0) return false    // out of credits
-  saveCredits({ ...c, balance: c.balance - COST_PER_MESSAGE })
+  if (c.balance <= 0) return false
+  saveCredits({ balance: c.balance - COST_PER_MESSAGE })
   return true
 }
 
 function authHeaders(): Record<string, string> {
   const auth = loadAuth()
-  if (!auth) return {}
-  return {
-    'X-Api-Key': auth.apiKey,
-    'X-Provider': auth.provider,
-    ...(auth.model ? { 'X-Model': auth.model } : {}),
-  }
+  if (!auth?.apiKey) return {}
+  return { 'X-Api-Key': auth.apiKey }
 }
 
 export interface ProjectStatus {
