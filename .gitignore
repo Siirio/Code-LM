@@ -1,6 +1,9 @@
 # Environment
 .env
 
+# Auto-generated at Electron startup — never commit
+docker-compose.runtime.yml
+
 # Python
 __pycache__/
 *.pyc

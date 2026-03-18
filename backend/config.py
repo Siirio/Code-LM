@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -6,6 +7,21 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # started from any working directory (e.g. the repo root, a Docker WORKDIR, or
 # a VS Code task runner) without the relative "../.env" silently missing.
 _ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+
+
+def _env_int(key: str, fallback: int) -> int:
+    """Read an integer env var, falling back to a default."""
+    val = os.environ.get(key)
+    if val is not None:
+        try:
+            return int(val)
+        except ValueError:
+            pass
+    return fallback
+
+
+def _env_str(key: str, fallback: str) -> str:
+    return os.environ.get(key) or fallback
 
 
 class Settings(BaseSettings):
@@ -22,9 +38,11 @@ class Settings(BaseSettings):
     llm_provider: str = "anthropic"  # default provider
     llm_model: str = ""              # empty = use provider default
 
-    # ── PostgreSQL ────────────────────────────────────────────────────────────
+    # ── PostgreSQL ─────────────────────────────────────────────────────────────
+    # ENGRAMAI_POSTGRES_PORT is injected by Electron at runtime with the
+    # dynamically allocated port. Falls back to .env / hardcoded default.
     postgres_host: str = "localhost"
-    postgres_port: int = 54320
+    postgres_port: int = _env_int("ENGRAMAI_POSTGRES_PORT", 54320)
     postgres_db: str = "engramai"
     postgres_user: str = "engramai"
     postgres_password: str = "engramai"
@@ -36,14 +54,16 @@ class Settings(BaseSettings):
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 
-    # ── Neo4j ─────────────────────────────────────────────────────────────────
-    neo4j_uri: str = "bolt://localhost:54321"
+    # ── Neo4j ──────────────────────────────────────────────────────────────────
+    # ENGRAMAI_NEO4J_URI is injected by Electron at runtime.
+    neo4j_uri: str = _env_str("ENGRAMAI_NEO4J_URI", "bolt://localhost:54321")
     neo4j_user: str = "neo4j"
     neo4j_password: str = "engramai"
 
-    # ── Qdrant ────────────────────────────────────────────────────────────────
+    # ── Qdrant ─────────────────────────────────────────────────────────────────
+    # ENGRAMAI_QDRANT_PORT is injected by Electron at runtime.
     qdrant_host: str = "localhost"
-    qdrant_port: int = 54323
+    qdrant_port: int = _env_int("ENGRAMAI_QDRANT_PORT", 54323)
     qdrant_api_key: str = ""  # empty = no auth (local instance)
 
 

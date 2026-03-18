@@ -1,10 +1,12 @@
 const { app, BrowserWindow, dialog, shell, ipcMain, Menu } = require('electron')
 let autoUpdater = null
 try { autoUpdater = require('electron-updater').autoUpdater } catch (_) {}
-const { spawn, execFile, exec } = require('child_process')
+const { spawn } = require('child_process')
 const path = require('path')
 const http = require('http')
-const fs = require('fs')
+const fs   = require('fs')
+
+const { startContainers, stopContainers } = require('./dockerManager')
 
 let mainWindow
 let backendProcess
@@ -22,8 +24,8 @@ function backendBinaryPath() {
   return dir
 }
 
-function dockerComposePath() {
-  return path.join(resourcesDir(), 'docker-compose.yml')
+function composeDir() {
+  return resourcesDir()
 }
 
 // ── Loading window ────────────────────────────────────────────────────────────
@@ -85,94 +87,33 @@ function closeLoading() {
   }
 }
 
-// ── Docker ────────────────────────────────────────────────────────────────────
-
-function isDockerAvailable() {
-  return new Promise(resolve => {
-    exec('docker info', (err) => resolve(!err))
-  })
-}
-
-function dockerComposeUp() {
-  return new Promise((resolve, reject) => {
-    const composePath = dockerComposePath()
-    // Try docker compose (v2) first, fall back to docker-compose (v1)
-    const cmd = 'docker'
-    const args = ['compose', '-p', 'engramai', '-f', composePath, 'up', '-d']
-    const proc = execFile(cmd, args, { timeout: 60000 }, (err, stdout, stderr) => {
-      if (err) {
-        // Try legacy docker-compose
-        execFile('docker-compose', ['-p', 'engramai', '-f', composePath, 'up', '-d'], { timeout: 60000 }, (err2, stdout2, stderr2) => {
-          if (err2) reject(new Error(`docker compose: ${stderr || err.message}\ndocker-compose: ${stderr2 || err2.message}\ncompose file: ${composePath}`))
-          else resolve()
-        })
-      } else {
-        resolve()
-      }
-    })
-  })
-}
-
-async function ensureDatabases() {
-  updateLoading('Checking Docker…')
-  const dockerOk = await isDockerAvailable()
-
-  if (!dockerOk) {
-    const choice = await dialog.showMessageBox({
-      type: 'warning',
-      title: 'Docker required',
-      message: 'Code LM needs Docker to run its databases.',
-      detail: 'Install Docker Desktop, then restart Code LM.\n\nDocker Desktop: https://www.docker.com/products/docker-desktop',
-      buttons: ['Open Docker website', 'Continue anyway', 'Quit'],
-      defaultId: 0,
-    })
-    if (choice.response === 0) shell.openExternal('https://www.docker.com/products/docker-desktop')
-    if (choice.response === 2) { app.quit(); process.exit(0) }
-    return // continue without Docker (user chose "continue anyway")
-  }
-
-  updateLoading('Starting databases (first run may take a minute)…')
-  try {
-    await dockerComposeUp()
-    updateLoading('Databases started')
-    // Give containers a moment to initialise
-    await sleep(2000)
-  } catch (e) {
-    console.error('Docker compose failed:', e.message)
-    await dialog.showMessageBox({
-      type: 'warning',
-      title: 'Database startup failed',
-      message: 'Could not start databases automatically.',
-      detail: `${e.message}\n\nCode LM will try to connect to existing databases.`,
-      buttons: ['OK'],
-    })
-  }
-}
-
 // ── Backend process ───────────────────────────────────────────────────────────
 
-function startBackend() {
+function startBackend(ports) {
   updateLoading('Starting Code LM backend…')
 
-  let bin, args, cwd
-
-  if (app.isPackaged) {
-    // Packaged: use PyInstaller binary
-    bin = backendBinaryPath()
-    args = []
-    cwd = path.dirname(bin)
-    if (!fs.existsSync(bin)) {
-      dialog.showErrorBox('Missing backend', `Backend binary not found:\n${bin}`)
-      app.quit()
-      return
-    }
-  } else {
-    // Dev mode: backend must be started manually (python main.py --dev)
+  if (!app.isPackaged) {
+    // Dev mode: backend started manually by developer
     updateLoading('Waiting for backend on :8765…')
     return
   }
 
-  backendProcess = spawn(bin, args, { cwd, env: { ...process.env } })
+  const bin = backendBinaryPath()
+  if (!fs.existsSync(bin)) {
+    dialog.showErrorBox('Missing backend', `Backend binary not found:\n${bin}`)
+    app.quit()
+    return
+  }
+
+  // Pass dynamic ports to backend via environment variables
+  const env = { ...process.env }
+  if (ports) {
+    env.ENGRAMAI_POSTGRES_PORT = String(ports.postgres)
+    env.ENGRAMAI_NEO4J_URI     = `bolt://localhost:${ports.neo4jBolt}`
+    env.ENGRAMAI_QDRANT_PORT   = String(ports.qdrant)
+  }
+
+  backendProcess = spawn(bin, [], { cwd: path.dirname(bin), env })
   backendProcess.stdout.on('data', d => console.log('[backend]', d.toString().trim()))
   backendProcess.stderr.on('data', d => console.error('[backend]', d.toString().trim()))
   backendProcess.on('exit', code => {
@@ -229,7 +170,6 @@ function createMainWindow(url) {
     closeLoading()
     win.show()
     win.focus()
-    // Check for app updates silently
     if (app.isPackaged && autoUpdater) autoUpdater.checkForUpdatesAndNotify()
   })
 
@@ -237,9 +177,7 @@ function createMainWindow(url) {
     if (win === mainWindow) mainWindow = null
   })
 
-  // Track the first window as mainWindow
   if (!mainWindow) mainWindow = win
-
   return win
 }
 
@@ -248,19 +186,14 @@ function createMainWindow(url) {
 if (autoUpdater) {
   autoUpdater.on('update-available', () => {
     dialog.showMessageBox({
-      type: 'info',
-      title: 'Update available',
-      message: 'A new version of Code LM is downloading…',
-      buttons: ['OK'],
+      type: 'info', title: 'Update available',
+      message: 'A new version of Code LM is downloading…', buttons: ['OK'],
     })
   })
-
   autoUpdater.on('update-downloaded', () => {
     dialog.showMessageBox({
-      type: 'question',
-      buttons: ['Restart now', 'Later'],
-      title: 'Update ready',
-      message: 'Code LM update downloaded. Restart to apply?',
+      type: 'question', buttons: ['Restart now', 'Later'],
+      title: 'Update ready', message: 'Code LM update downloaded. Restart to apply?',
     }).then(r => { if (r.response === 0) autoUpdater.quitAndInstall() })
   })
 }
@@ -269,7 +202,7 @@ if (autoUpdater) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
 
-// ── IPC handlers ─────────────────────────────────────────────────────────
+// ── IPC handlers ─────────────────────────────────────────────────────────────
 
 ipcMain.handle('open-folder', async () => {
   const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
@@ -282,7 +215,7 @@ ipcMain.handle('open-in-new-window', async (_event, folderPath) => {
   createMainWindow(url)
 })
 
-// ── Application menu ─────────────────────────────────────────────────────
+// ── Application menu ─────────────────────────────────────────────────────────
 
 function buildMenu() {
   const template = [
@@ -297,17 +230,14 @@ function buildMenu() {
             if (!result.canceled && result.filePaths[0]) {
               const folderPath = result.filePaths[0]
               const pid = Buffer.from(folderPath).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 32)
-              const url = `http://localhost:8765?root=${encodeURIComponent(folderPath)}&pid=${pid}`
-              createMainWindow(url)
+              createMainWindow(`http://localhost:8765?root=${encodeURIComponent(folderPath)}&pid=${pid}`)
             }
           },
         },
         {
           label: 'New Window',
           accelerator: 'CmdOrCtrl+Shift+N',
-          click: () => {
-            createMainWindow()
-          },
+          click: () => createMainWindow(),
         },
         { type: 'separator' },
         { role: 'quit' },
@@ -316,24 +246,18 @@ function buildMenu() {
     {
       label: 'Edit',
       submenu: [
-        { role: 'undo' },
-        { role: 'redo' },
-        { type: 'separator' },
-        { role: 'cut' },
-        { role: 'copy' },
-        { role: 'paste' },
-        { role: 'selectAll' },
+        { role: 'undo' }, { role: 'redo' }, { type: 'separator' },
+        { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' },
       ],
     },
     {
       label: 'View',
       submenu: [
-        { role: 'reload' },
-        { role: 'forceReload' },
-        { role: 'toggleDevTools' },
-        { type: 'separator' },
-        { role: 'togglefullscreen' },
-        { label: 'Exit Full Screen', accelerator: 'Escape', click: () => { if (mainWindow && mainWindow.isFullScreen()) mainWindow.setFullScreen(false) } },
+        { role: 'reload' }, { role: 'forceReload' }, { role: 'toggleDevTools' },
+        { type: 'separator' }, { role: 'togglefullscreen' },
+        { label: 'Exit Full Screen', accelerator: 'Escape', click: () => {
+          if (mainWindow && mainWindow.isFullScreen()) mainWindow.setFullScreen(false)
+        }},
       ],
     },
   ]
@@ -346,15 +270,51 @@ app.whenReady().then(async () => {
   buildMenu()
   showLoading('Initialising…')
 
-  await ensureDatabases()
-  startBackend()
+  // ── Start Docker containers with dynamic ports ──────────────────────────
+  let ports = null
+  try {
+    ports = await startContainers(composeDir(), updateLoading)
+
+    if (ports === null) {
+      // Docker not available
+      const choice = await dialog.showMessageBox({
+        type: 'warning',
+        title: 'Docker required',
+        message: 'Code LM needs Docker to run its databases.',
+        detail: 'Install Docker Desktop, then restart Code LM.\n\nDocker Desktop: https://www.docker.com/products/docker-desktop',
+        buttons: ['Open Docker website', 'Continue anyway', 'Quit'],
+        defaultId: 0,
+      })
+      if (choice.response === 0) shell.openExternal('https://www.docker.com/products/docker-desktop')
+      if (choice.response === 2) { app.quit(); return }
+      // "Continue anyway" — proceed without Docker, backend will use defaults
+    }
+  } catch (e) {
+    console.error('[main] Docker startup failed:', e.message)
+    await dialog.showMessageBox({
+      type: 'warning',
+      title: 'Database startup failed',
+      message: 'Could not start databases automatically.',
+      detail: `${e.message}\n\nCode LM will try to connect to existing databases.`,
+      buttons: ['OK'],
+    })
+  }
+
+  // ── Start Python backend, passing dynamic port env vars ────────────────
+  startBackend(ports)
 
   updateLoading('Waiting for backend…')
   try {
     await waitForBackend()
   } catch (e) {
     closeLoading()
-    await dialog.showErrorBox('Backend failed to start', e.message + '\n\nCheck that ports 8765, 5433, 7687, 6333 are free.')
+    const portInfo = ports
+      ? `Postgres :${ports.postgres}  Neo4j :${ports.neo4jBolt}  Qdrant :${ports.qdrant}`
+      : 'Could not determine ports'
+    await dialog.showErrorBox(
+      'Backend failed to start',
+      `${e.message}\n\n${portInfo}`
+    )
     app.quit()
     return
   }
@@ -371,6 +331,7 @@ app.on('activate', () => {
   if (!mainWindow) createMainWindow()
 })
 
-app.on('before-quit', () => {
+app.on('before-quit', async () => {
   if (backendProcess) backendProcess.kill()
+  await stopContainers(composeDir())
 })
