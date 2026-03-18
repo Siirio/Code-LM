@@ -12,12 +12,9 @@ from config import settings
 COLLECTION_FILES = "project_files"
 COLLECTION_FUNCTIONS = "project_functions"
 
-# Embedding dimension used for the project_files and project_functions collections.
-# 384 matches the all-MiniLM-L6-v2 model and is used as a zero-vector placeholder
-# until a real embedding pipeline is wired in (CodeAiPlan.md Phase 2).
-# If you switch to a different model (e.g. text-embedding-3-small = 1536) you must
-# drop and recreate the collections because Qdrant does not allow dimension changes.
-EMBEDDING_DIM = 384
+# Embedding dimension — matches OpenAI text-embedding-3-small output (1536).
+# Changing this requires dropping and recreating Qdrant collections.
+EMBEDDING_DIM = 1536
 
 
 class QdrantClientWrapper:

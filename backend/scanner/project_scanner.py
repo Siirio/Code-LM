@@ -13,26 +13,24 @@ from storage import memory_service
 from storage.qdrant_client import qdrant_client, COLLECTION_FILES, EMBEDDING_DIM
 from scanner.import_resolver import resolve_and_write_edges
 
-# Lazy-loaded sentence-transformers model for generating real Qdrant embeddings.
-# Initialized on first use to avoid slow import at module load time.
-_embedding_model = None
-
-
-def _get_embedding_model():
-    """Return the sentence-transformers embedding model, loading it lazily on first call."""
-    global _embedding_model
-    if _embedding_model is None:
-        from sentence_transformers import SentenceTransformer
-        _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-    return _embedding_model
-
-
 def _generate_embedding(class_names: list[str], file_path: str, layer: str, methods: list[str]) -> list[float]:
-    """Generate a 384-dim embedding from the node's key fields using all-MiniLM-L6-v2."""
+    """Generate a 1536-dim embedding via OpenAI text-embedding-3-small.
+    Falls back to zero vector if no API key is configured.
+    """
+    from config import settings
+    from storage.qdrant_client import EMBEDDING_DIM
     text = f"{' '.join(class_names)} {file_path} {layer} {' '.join(methods)}"
-    model = _get_embedding_model()
-    embedding = model.encode(text, normalize_embeddings=True)
-    return embedding.tolist()
+    api_key = getattr(settings, "openai_api_key", None)
+    if not api_key:
+        return [0.0] * EMBEDDING_DIM
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        response = client.embeddings.create(model="text-embedding-3-small", input=text)
+        return response.data[0].embedding
+    except Exception as e:
+        logger.warning("Embedding generation failed: %s — using zero vector", e)
+        return [0.0] * EMBEDDING_DIM
 
 logger = logging.getLogger(__name__)
 

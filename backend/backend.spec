@@ -66,6 +66,7 @@ a = Analysis(
     runtime_hooks=[],
     excludes=[
         'matplotlib', 'pandas', 'PIL', 'tkinter',
+        'torch', 'torchvision', 'torchaudio', 'sentence_transformers',
         'test', 'tests', 'unittest',
     ],
     win_no_prefer_redirects=False,
