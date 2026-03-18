@@ -3,7 +3,7 @@ import logging
 import anthropic
 import google.api_core.exceptions
 import openai
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -31,7 +31,12 @@ class ChatResponse(BaseModel):
 
 
 @router.post("", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(
+    request: ChatRequest,
+    x_api_key: str = Header(default="", alias="X-Api-Key"),
+    x_provider: str = Header(default="anthropic", alias="X-Provider"),
+    x_model: str = Header(default="", alias="X-Model"),
+):
     try:
         result = await orchestrator_chat(
             project_id=request.project_id,
@@ -39,6 +44,9 @@ async def chat(request: ChatRequest):
             conversation_id=request.conversation_id,
             session_id=request.session_id,
             agent_id=request.agent_id,
+            api_key=x_api_key,
+            provider_name=x_provider,
+            model=x_model or None,
         )
         return ChatResponse(**result)
 
@@ -117,7 +125,12 @@ async def chat(request: ChatRequest):
 
 
 @router.post("/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(
+    request: ChatRequest,
+    x_api_key: str = Header(default="", alias="X-Api-Key"),
+    x_provider: str = Header(default="anthropic", alias="X-Provider"),
+    x_model: str = Header(default="", alias="X-Model"),
+):
     """Stream chat responses as Server-Sent Events.
 
     Returns the same logical response as POST /chat but streamed as SSE:
@@ -132,6 +145,9 @@ async def chat_stream(request: ChatRequest):
             conversation_id=request.conversation_id,
             session_id=request.session_id,
             agent_id=request.agent_id,
+            api_key=x_api_key,
+            provider_name=x_provider,
+            model=x_model or None,
         ),
         media_type="text/event-stream",
         headers={

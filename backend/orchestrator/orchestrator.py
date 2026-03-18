@@ -3,7 +3,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncGenerator
-from config import settings
+from fastapi import HTTPException
 from llm.factory import get_provider
 
 logger = logging.getLogger(__name__)
@@ -521,26 +521,44 @@ async def _summarize_history(history_messages: list[dict], api_key: str) -> list
     return condensed
 
 
+def _default_model(provider_name: str) -> str:
+    """Return the default model name for a given LLM provider."""
+    defaults = {
+        "anthropic": "claude-opus-4-6",
+        "openai": "gpt-4o",
+        "gemini": "gemini-1.5-flash",
+    }
+    return defaults.get(provider_name.lower().strip(), "claude-opus-4-6")
+
+
 async def chat(
     project_id: str,
     message: str,
     conversation_id: str | None,
     session_id: str | None = None,
     agent_id: str | None = None,
+    api_key: str = "",
+    provider_name: str = "anthropic",
+    model: str | None = None,
 ) -> dict:
     """
-    Run the orchestrator: load context → call LLM → handle tool calls → return reply.
-    Provider is selected from config (LLM_PROVIDER env var).
+    Run the orchestrator: load context -> call LLM -> handle tool calls -> return reply.
+    Provider and API key are supplied per-request from the caller (HTTP headers).
     Returns dict with: reply, conversation_id, memory_update_proposed, memory_update_proposal
     """
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+
     from storage.memory_service import (
         get_messages, add_message as save_message, get_persona,
     )
 
+    resolved_model = model or _default_model(provider_name)
+
     provider = get_provider(
-        provider_name=settings.llm_provider,
-        model=settings.active_model,
-        api_key=settings.active_api_key,
+        provider_name=provider_name,
+        model=resolved_model,
+        api_key=api_key,
     )
 
     # Inject the current project_id into the system prompt so the LLM always
@@ -564,7 +582,7 @@ async def chat(
     if session_id:
         history = await get_messages(session_id)
         history_msgs = [{"role": msg["role"], "content": msg["content"]} for msg in history]
-        messages = await _summarize_history(history_msgs, settings.active_api_key)
+        messages = await _summarize_history(history_msgs, api_key)
         # Persist the new user message
         await save_message(session_id, "user", message)
 
@@ -636,6 +654,9 @@ async def chat_stream(
     conversation_id: str | None,
     session_id: str | None = None,
     agent_id: str | None = None,
+    api_key: str = "",
+    provider_name: str = "anthropic",
+    model: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream the orchestrator response as Server-Sent Events.
 
@@ -648,19 +669,25 @@ async def chat_stream(
     then streaming resumes for the next LLM turn.  This method currently
     requires the Anthropic provider because it uses the streaming API directly.
     """
+    if not api_key:
+        yield _sse({"chunk": "Error: API key required. Please set your API key in the settings."})
+        yield _sse({"done": True})
+        return
+
     import anthropic
 
     from storage.memory_service import (
         get_messages, add_message as save_message, get_persona,
     )
 
-    if settings.llm_provider != "anthropic":
+    if provider_name != "anthropic":
         yield _sse({"chunk": "Streaming is currently only supported with the Anthropic provider."})
         yield _sse({"done": True})
         return
 
-    client = anthropic.Anthropic(api_key=settings.active_api_key)
-    model = settings.active_model
+    resolved_model = model or _default_model(provider_name)
+
+    client = anthropic.Anthropic(api_key=api_key)
 
     # Detect sub-agent and emit it as first SSE event
     detected_agent = _detect_agent(message)
@@ -684,7 +711,7 @@ async def chat_stream(
     if session_id and detected_agent == "main":
         history = await get_messages(session_id)
         history_msgs = [{"role": msg["role"], "content": msg["content"]} for msg in history]
-        messages = await _summarize_history(history_msgs, settings.active_api_key)
+        messages = await _summarize_history(history_msgs, api_key)
         await save_message(session_id, "user", message)
     elif session_id:
         # Sub-agents: fresh context, but still persist messages for continuity
@@ -703,7 +730,7 @@ async def chat_stream(
     while True:
         # Open a streaming request to Anthropic
         with client.messages.stream(
-            model=model,
+            model=resolved_model,
             max_tokens=4096,
             system=system_prompt_with_context,
             tools=TOOLS,

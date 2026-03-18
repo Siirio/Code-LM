@@ -792,3 +792,29 @@ body {
 .tree-name { font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
 .tree-error { padding: 12px; font-size: 12px; color: var(--text-dim); }
 .tree-loading { padding: 12px; font-size: 12px; color: var(--text-dim); animation: pulse 1.5s infinite; }
+
+/* ── Auth modal ───────────────────────────────────────────────────────────── */
+
+.auth-modal { width: 480px; }
+.auth-provider-row { display: flex; gap: 8px; margin-bottom: 16px; }
+.auth-provider-btn { flex: 1; padding: 8px; background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; color: var(--text-dim); font-family: var(--font-mono); font-size: 12px; cursor: pointer; transition: all 0.15s; }
+.auth-provider-btn:hover { border-color: var(--accent); color: var(--text); }
+.auth-provider-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.auth-input { width: 100%; padding: 10px 14px; background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-family: var(--font-mono); font-size: 13px; outline: none; margin-bottom: 8px; }
+.auth-input:focus { border-color: var(--accent); }
+.auth-link { font-size: 11px; color: var(--accent); cursor: pointer; text-decoration: none; display: block; margin-bottom: 16px; }
+.auth-link:hover { color: var(--accent-hover); }
+.auth-connect-btn { width: 100%; padding: 10px; background: var(--accent); border: none; border-radius: 4px; color: #fff; font-family: var(--font-mono); font-size: 14px; cursor: pointer; transition: background 0.15s; }
+.auth-connect-btn:hover:not(:disabled) { background: var(--accent-hover); }
+.auth-connect-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.auth-advanced-toggle { font-size: 11px; color: var(--text-dim); cursor: pointer; margin-bottom: 8px; background: none; border: none; font-family: var(--font-mono); padding: 0; }
+.auth-advanced-toggle:hover { color: var(--text); }
+
+/* ── Auth indicator in toolbar ────────────────────────────────────────────── */
+
+.auth-indicator { display: flex; align-items: center; gap: 5px; padding: 4px 8px; border-radius: 4px; cursor: pointer; border: 1px solid transparent; transition: all 0.15s; margin-right: 4px; }
+.auth-indicator:hover { background: var(--bg3); border-color: var(--border); }
+.auth-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.auth-dot.connected { background: var(--green); }
+.auth-dot.disconnected { background: var(--red); animation: pulse 2s ease-in-out infinite; }
+.auth-label { font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); }

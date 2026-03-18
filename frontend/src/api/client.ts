@@ -1,5 +1,39 @@
 const BASE = '/api/v1'
 
+// ── Auth config (per-user API key) ───────────────────────────────────────────
+
+export interface AuthConfig {
+  provider: 'anthropic' | 'openai' | 'gemini'
+  apiKey: string
+  model?: string
+}
+
+export function loadAuth(): AuthConfig | null {
+  try {
+    const raw = localStorage.getItem('codelm_auth')
+    if (raw) return JSON.parse(raw)
+  } catch { /* ignore */ }
+  return null
+}
+
+export function saveAuth(config: AuthConfig) {
+  localStorage.setItem('codelm_auth', JSON.stringify(config))
+}
+
+export function clearAuth() {
+  localStorage.removeItem('codelm_auth')
+}
+
+function authHeaders(): Record<string, string> {
+  const auth = loadAuth()
+  if (!auth) return {}
+  return {
+    'X-Api-Key': auth.apiKey,
+    'X-Provider': auth.provider,
+    ...(auth.model ? { 'X-Model': auth.model } : {}),
+  }
+}
+
 export interface ProjectStatus {
   project_id: string
   indexed: boolean
@@ -147,7 +181,7 @@ export function chatStream(
     try {
       const res = await fetch(`${BASE}/chat/stream`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify(params),
         signal: controller.signal,
       })

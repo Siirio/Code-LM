@@ -15,39 +15,6 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8765
 
-    # ── LLM Provider ──────────────────────────────────────────────────────────
-    # Which provider to use: "anthropic" | "gemini" | "openai"
-    llm_provider: str = "anthropic"
-
-    # Anthropic
-    anthropic_api_key: str = ""
-    anthropic_model: str = "claude-opus-4-6"
-
-    # Gemini
-    gemini_api_key: str = ""
-    gemini_model: str = "gemini-1.5-flash"
-
-    # OpenAI
-    openai_api_key: str = ""
-    openai_model: str = "gpt-4o"
-
-    # ── Active model (resolved from provider) ────────────────────────────────
-    @property
-    def active_api_key(self) -> str:
-        if self.llm_provider == "gemini":
-            return self.gemini_api_key
-        if self.llm_provider == "openai":
-            return self.openai_api_key
-        return self.anthropic_api_key
-
-    @property
-    def active_model(self) -> str:
-        if self.llm_provider == "gemini":
-            return self.gemini_model
-        if self.llm_provider == "openai":
-            return self.openai_model
-        return self.anthropic_model
-
     # ── PostgreSQL ────────────────────────────────────────────────────────────
     postgres_host: str = "localhost"
     postgres_port: int = 5432

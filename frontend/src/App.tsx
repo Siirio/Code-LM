@@ -1,13 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   chatStream,
+  clearAuth,
   createSession,
   deleteSession,
   fetchFileTree,
   getMessages,
   getProjectStatus,
   listSessions,
+  loadAuth,
+  saveAuth,
   scanProject,
+  type AuthConfig,
   type ChatMessage,
   type FileEditProposal,
   type Session,
@@ -250,6 +254,10 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   // Help modal
   const [showHelp, setShowHelp] = useState(false)
 
+  // Auth
+  const [auth, setAuth] = useState<AuthConfig | null>(loadAuth)
+  const [showAuth, setShowAuth] = useState(false)
+
   // Left panel tab
   const [leftTab, setLeftTab] = useState<'chats' | 'files'>('chats')
 
@@ -433,6 +441,10 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
 
   async function send() {
     if (busy || !input.trim()) return
+    if (!auth || !auth.apiKey) {
+      setShowAuth(true)
+      return
+    }
     let msg = input.trim()
     setInput('')
     setSlashSuggestions([])
@@ -602,6 +614,10 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
         <div className="toolbar">
           <div className="toolbar-title">Code LM</div>
           <div className="toolbar-actions">
+            <div className="auth-indicator" onClick={() => setShowAuth(true)} title={auth ? `${auth.provider} connected` : 'No API key'}>
+              <span className={`auth-dot ${auth ? 'connected' : 'disconnected'}`} />
+              <span className="auth-label">{auth ? auth.provider : 'Connect'}</span>
+            </div>
             <button className="toolbar-btn" onClick={() => setShowHelp(true)} title="Help">?</button>
             <button className="toolbar-btn" onClick={() => setShowSettings(true)} title="Settings">&#9881;</button>
           </div>
@@ -733,6 +749,24 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
         </div>
       )}
 
+      {/* Auth modal */}
+      {showAuth && (
+        <AuthModal
+          initial={auth}
+          onSave={(config) => {
+            saveAuth(config)
+            setAuth(config)
+            setShowAuth(false)
+          }}
+          onDisconnect={() => {
+            clearAuth()
+            setAuth(null)
+            setShowAuth(false)
+          }}
+          hasExisting={Boolean(auth)}
+        />
+      )}
+
       {/* Diff dialog */}
       {pendingEdit && (
         <DiffDialog
@@ -774,6 +808,115 @@ function MessageBubble({ message }: { message: DisplayMessage }) {
       )}
       {message.role === 'user' && <div className="message-header"><span className="sender">You</span></div>}
       <pre className="message-content">{message.content}</pre>
+    </div>
+  )
+}
+
+// ── AuthModal ─────────────────────────────────────────────────────────────────
+
+const PROVIDER_PLACEHOLDERS: Record<string, string> = {
+  anthropic: 'sk-ant-...',
+  openai: 'sk-...',
+  gemini: 'AIza...',
+}
+
+const PROVIDER_LINKS: Record<string, string> = {
+  anthropic: 'https://console.anthropic.com',
+  openai: 'https://platform.openai.com/api-keys',
+  gemini: 'https://aistudio.google.com/app/apikey',
+}
+
+function AuthModal({
+  initial,
+  onSave,
+  onDisconnect,
+  hasExisting,
+}: {
+  initial: AuthConfig | null
+  onSave: (config: AuthConfig) => void
+  onDisconnect: () => void
+  hasExisting: boolean
+}) {
+  const [provider, setProvider] = useState<AuthConfig['provider']>(initial?.provider || 'anthropic')
+  const [apiKey, setApiKey] = useState(initial?.apiKey || '')
+  const [model, setModel] = useState(initial?.model || '')
+  const [showAdvanced, setShowAdvanced] = useState(Boolean(initial?.model))
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal auth-modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">Connect your AI</span>
+          {hasExisting && (
+            <button className="modal-close" onClick={onDisconnect} title="Disconnect">&#10005;</button>
+          )}
+        </div>
+        <div className="modal-body">
+          <p style={{ fontSize: '12px', color: 'var(--text-dim)', marginBottom: '16px' }}>
+            Enter your API key to start using Code LM
+          </p>
+
+          <div className="auth-provider-row">
+            {(['anthropic', 'openai', 'gemini'] as const).map(p => (
+              <button
+                key={p}
+                className={`auth-provider-btn ${provider === p ? 'active' : ''}`}
+                onClick={() => setProvider(p)}
+              >
+                {p.charAt(0).toUpperCase() + p.slice(1)}
+              </button>
+            ))}
+          </div>
+
+          <input
+            type="password"
+            className="auth-input"
+            placeholder={PROVIDER_PLACEHOLDERS[provider]}
+            value={apiKey}
+            onChange={e => setApiKey(e.target.value)}
+            autoFocus
+          />
+
+          <a
+            className="auth-link"
+            href={PROVIDER_LINKS[provider]}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Get your API key &rarr;
+          </a>
+
+          <button
+            className="auth-advanced-toggle"
+            onClick={() => setShowAdvanced(!showAdvanced)}
+          >
+            {showAdvanced ? '- Advanced' : '+ Advanced'}
+          </button>
+
+          {showAdvanced && (
+            <input
+              className="auth-input"
+              placeholder="Custom model name (optional)"
+              value={model}
+              onChange={e => setModel(e.target.value)}
+            />
+          )}
+
+          <button
+            className="auth-connect-btn"
+            disabled={!apiKey.trim()}
+            onClick={() =>
+              onSave({
+                provider,
+                apiKey: apiKey.trim(),
+                ...(model.trim() ? { model: model.trim() } : {}),
+              })
+            }
+          >
+            Connect
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
