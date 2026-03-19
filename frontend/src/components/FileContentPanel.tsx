@@ -110,6 +110,11 @@ export default function FileContentPanel({ file, onClose, fontSize = 13 }: Props
               overviewRulerLanes: 0,
               renderLineHighlight: 'line',
               contextmenu: true,
+              mouseStyle: 'text',
+              cursorBlinking: 'smooth',
+              cursorSmoothCaretAnimation: 'on',
+              scrollBeyondLastColumn: 5,
+              emptySelectionClipboard: false,
             }}
           />
         )}

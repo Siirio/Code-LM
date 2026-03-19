@@ -2,6 +2,7 @@
 import base64
 import logging
 import os
+import shutil as _shutil
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -15,10 +16,14 @@ router = APIRouter()
 @router.get("/tree")
 async def get_file_tree(root: str):
     """Return directory tree for the given root path."""
-    SKIP = {"node_modules", "venv", ".venv", ".git", "__pycache__", "build", "dist", "target", ".idea", ".gradle", "out"}
+    SKIP = {
+        "node_modules", "venv", ".venv", ".git", "__pycache__",
+        "build", "dist", "target", ".idea", ".gradle", "out",
+        ".next", ".nuxt", "coverage", ".nyc_output", "tmp", ".tmp",
+    }
 
     def walk(path: str, depth: int = 0) -> dict | None:
-        if depth > 6:
+        if depth > 10:
             return None
         name = os.path.basename(path)
         if name.startswith('.') and name not in {'.env'}:
@@ -38,10 +43,11 @@ async def get_file_tree(root: str):
         else:
             return {"name": name, "path": path, "type": "file", "children": []}
 
-    if not root or not os.path.isdir(root):
-        raise HTTPException(status_code=400, detail="Invalid root path")
+    resolved_root = _resolve_path(root)
+    if not resolved_root or not os.path.isdir(resolved_root):
+        raise HTTPException(status_code=400, detail=f"Path not found: {root!r}")
 
-    tree = walk(root)
+    tree = walk(resolved_root)
     return tree or {"name": os.path.basename(root), "path": root, "type": "dir", "children": []}
 
 
@@ -142,6 +148,44 @@ async def save_file_content(path: str, body: SaveContentRequest):
     try:
         with open(resolved, 'w', encoding='utf-8') as f:
             f.write(body.content)
+        return {"status": "ok"}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.delete("")
+async def delete_path(path: str):
+    """Delete a file or directory from disk."""
+    resolved = _resolve_path(path)
+    if not os.path.exists(resolved):
+        raise HTTPException(status_code=404, detail="Path not found")
+    try:
+        if os.path.isfile(resolved):
+            os.remove(resolved)
+        elif os.path.isdir(resolved):
+            _shutil.rmtree(resolved)
+        return {"status": "ok"}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+class CreatePathRequest(BaseModel):
+    path: str
+    is_dir: bool = False
+    content: str = ""
+
+
+@router.post("/create")
+async def create_path(request: CreatePathRequest):
+    """Create a new file or directory."""
+    resolved = _resolve_path(request.path)
+    try:
+        if request.is_dir:
+            os.makedirs(resolved, exist_ok=True)
+        else:
+            os.makedirs(os.path.dirname(resolved), exist_ok=True)
+            with open(resolved, 'w', encoding='utf-8') as f:
+                f.write(request.content)
         return {"status": "ok"}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
