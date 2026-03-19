@@ -1,56 +1,28 @@
 /**
- * FileContentPanel — renders opened files with syntax highlighting.
- *
- * Handles:
- *  - Code / text  → Shiki (VS Code–grade syntax highlighting, vitesse-dark theme)
- *  - Markdown      → marked (rendered HTML)
- *  - Images        → <img> centered
- *  - Binary/other  → neutral "cannot preview" message
+ * FileContentPanel — editable file viewer.
+ * Text files -> Monaco Editor (auto-saves every 1s after last change)
+ * Images     -> <img> centered
+ * Binary     -> placeholder
  */
-
-import { useEffect, useRef, useState } from 'react'
-import { createHighlighter, type Highlighter } from 'shiki'
-import { marked } from 'marked'
-
-// ── Extension → Shiki language map ───────────────────────────────────────────
+import { useEffect, useRef } from 'react'
+import Editor from '@monaco-editor/react'
 
 const EXT_LANG: Record<string, string> = {
-  js: 'javascript', jsx: 'jsx', ts: 'typescript', tsx: 'tsx',
+  js: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript',
   py: 'python', java: 'java', kt: 'kotlin', swift: 'swift',
   go: 'go', rs: 'rust', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', c: 'c', h: 'c',
   cs: 'csharp', php: 'php', rb: 'ruby', scala: 'scala', dart: 'dart',
-  json: 'json', jsonc: 'jsonc', yaml: 'yaml', yml: 'yaml', toml: 'toml',
+  json: 'json', yaml: 'yaml', yml: 'yaml', toml: 'ini',
   xml: 'xml', html: 'html', htm: 'html', css: 'css', scss: 'scss', less: 'less',
-  sh: 'bash', bash: 'bash', zsh: 'bash', fish: 'bash',
-  sql: 'sql', graphql: 'graphql', gql: 'graphql',
-  dockerfile: 'dockerfile', makefile: 'makefile',
-  md: 'markdown', mdx: 'mdx',
-  r: 'r', lua: 'lua', vim: 'viml', tf: 'hcl', hcl: 'hcl',
-  proto: 'protobuf', gradle: 'groovy', groovy: 'groovy',
+  sh: 'shell', bash: 'shell', zsh: 'shell', sql: 'sql', graphql: 'graphql',
+  md: 'markdown', mdx: 'markdown', tf: 'hcl', proto: 'protobuf',
+  r: 'r', lua: 'lua', gradle: 'groovy',
 }
-
-const SHIKI_LANGS = [...new Set(Object.values(EXT_LANG))]
-
-// Singleton highlighter — created once, reused
-let _highlighter: Highlighter | null = null
-let _highlighterPromise: Promise<Highlighter> | null = null
-
-function getHighlighter(): Promise<Highlighter> {
-  if (_highlighter) return Promise.resolve(_highlighter)
-  if (_highlighterPromise) return _highlighterPromise
-  _highlighterPromise = createHighlighter({
-    themes: ['vitesse-dark'],
-    langs: SHIKI_LANGS,
-  }).then(h => { _highlighter = h; return h })
-  return _highlighterPromise!
-}
-
-// ── Component ─────────────────────────────────────────────────────────────────
 
 export interface OpenFile {
   path: string
   type: 'text' | 'image' | 'binary'
-  content: string   // text content or base64 for images
+  content: string
   mime?: string
   ext: string
   size: number
@@ -59,54 +31,44 @@ export interface OpenFile {
 interface Props {
   file: OpenFile
   onClose: () => void
+  fontSize?: number
 }
 
-export default function FileContentPanel({ file, onClose }: Props) {
-  const [html, setHtml] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-  const containerRef = useRef<HTMLDivElement>(null)
+function formatBytes(n: number) {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 ** 2).toFixed(1)} MB`
+}
 
+export default function FileContentPanel({ file, onClose, fontSize = 13 }: Props) {
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fileName = file.path.split(/[/\\]/).pop() || file.path
+  const lang = EXT_LANG[file.ext.toLowerCase()] || 'plaintext'
 
-  useEffect(() => {
-    if (file.type !== 'text') { setHtml(null); return }
+  useEffect(() => () => {
+    if (saveTimer.current) clearTimeout(saveTimer.current)
+  }, [])
 
-    const ext = file.ext.toLowerCase()
-
-    // Markdown — render with marked
-    if (ext === 'md' || ext === 'mdx') {
-      setHtml(marked.parse(file.content) as string)
-      return
-    }
-
-    // Code — highlight with Shiki
-    const lang = EXT_LANG[ext] || 'text'
-    setLoading(true)
-    setHtml(null)
-
-    getHighlighter().then(h => {
-      const highlighted = h.codeToHtml(file.content, {
-        lang,
-        theme: 'vitesse-dark',
-      })
-      setHtml(highlighted)
-      setLoading(false)
-    }).catch(() => {
-      // Fallback: plain text
-      setHtml(`<pre style="white-space:pre-wrap;word-break:break-word">${escHtml(file.content)}</pre>`)
-      setLoading(false)
-    })
-  }, [file.path, file.content, file.ext, file.type])
+  function handleChange(value: string | undefined) {
+    if (value === undefined) return
+    if (saveTimer.current) clearTimeout(saveTimer.current)
+    saveTimer.current = setTimeout(() => {
+      fetch(`/api/v1/files/content?path=${encodeURIComponent(file.path)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: value }),
+      }).catch(() => {})
+    }, 1000)
+  }
 
   return (
     <div className="file-content-panel">
       <div className="file-content-header">
         <span className="file-content-name">{fileName}</span>
         <span className="file-content-path">{file.path}</span>
-        <button className="file-content-close" onClick={onClose} title="Close">✕</button>
+        <button className="file-content-close" onClick={onClose} title="Close">&#10005;</button>
       </div>
-
-      <div className="file-content-body" ref={containerRef}>
+      <div className="file-content-body">
         {file.type === 'image' && (
           <div className="file-content-image-wrap">
             <img
@@ -116,46 +78,42 @@ export default function FileContentPanel({ file, onClose }: Props) {
             />
           </div>
         )}
-
         {file.type === 'binary' && (
           <div className="file-content-binary">
-            <div className="binary-icon">📄</div>
+            <div className="binary-icon">&#128196;</div>
             <div className="binary-name">{fileName}</div>
-            <div className="binary-info">
-              Binary file · {file.ext.toUpperCase()} · {formatBytes(file.size)}
-            </div>
+            <div className="binary-info">Binary &middot; {file.ext.toUpperCase()} &middot; {formatBytes(file.size)}</div>
             <div className="binary-msg">This file type cannot be previewed</div>
           </div>
         )}
-
-        {file.type === 'text' && loading && (
-          <div className="file-content-loading">Highlighting…</div>
-        )}
-
-        {file.type === 'text' && !loading && html && (
-          file.ext === 'md' || file.ext === 'mdx'
-            ? <div
-                className="markdown-body"
-                dangerouslySetInnerHTML={{ __html: html }}
-              />
-            : <div
-                className="shiki-wrap"
-                dangerouslySetInnerHTML={{ __html: html }}
-              />
+        {file.type === 'text' && (
+          <Editor
+            key={file.path}
+            height="100%"
+            language={lang}
+            defaultValue={file.content}
+            theme="vs-dark"
+            onChange={handleChange}
+            options={{
+              minimap: { enabled: false },
+              fontSize,
+              lineNumbers: 'on',
+              wordWrap: 'off',
+              scrollBeyondLastLine: false,
+              automaticLayout: true,
+              padding: { top: 8, bottom: 8 },
+              scrollbar: {
+                verticalScrollbarSize: 6,
+                horizontalScrollbarSize: 6,
+                useShadows: false,
+              },
+              overviewRulerLanes: 0,
+              renderLineHighlight: 'line',
+              contextmenu: true,
+            }}
+          />
         )}
       </div>
     </div>
   )
-}
-
-// ── Utils ─────────────────────────────────────────────────────────────────────
-
-function escHtml(s: string) {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-}
-
-function formatBytes(n: number) {
-  if (n < 1024) return `${n} B`
-  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`
-  return `${(n / 1024 ** 2).toFixed(1)} MB`
 }
