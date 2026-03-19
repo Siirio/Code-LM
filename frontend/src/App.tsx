@@ -23,6 +23,7 @@ import {
 } from './api/client'
 import DiffDialog from './components/DiffDialog'
 import FileContentPanel, { type OpenFile } from './components/FileContentPanel'
+import TerminalPanel from './components/TerminalPanel'
 import './index.css'
 
 // ── Electron typings ─────────────────────────────────────────────────────────
@@ -76,6 +77,12 @@ function loadSettings(): CodeLMSettings {
   return { ...DEFAULT_SETTINGS }
 }
 
+// Apply zoom immediately at module load to avoid layout flash
+;(function applyInitialZoom() {
+  const s = loadSettings()
+  document.documentElement.style.zoom = String(SCALE_ZOOM[s.uiScale] ?? 1.0)
+})()
+
 function saveSettings(s: CodeLMSettings) {
   localStorage.setItem('codelm_settings', JSON.stringify(s))
 }
@@ -86,6 +93,7 @@ const SLASH_COMMANDS = [
   { command: '/full-scan', description: 'Index entire project' },
   { command: '/auto-scan', description: 'AI finds context automatically' },
   { command: '/package-scan', description: 'Scan specific directory' },
+  { command: '/terminal', description: 'Open terminal panel' },
 ]
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -280,6 +288,30 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   // Left panel tab
   const [leftTab, setLeftTab] = useState<'chats' | 'files'>('chats')
 
+  // Panel widths (resizable)
+  const [leftWidth, setLeftWidth] = useState(240)
+  const [midWidth, setMidWidth] = useState(480)
+
+  // Content zoom (Ctrl+wheel per panel)
+  const [leftZoom, setLeftZoom] = useState(1.0)
+  const [midFontSize, setMidFontSize] = useState(13)
+
+  // Terminal
+  const [terminalOpen, setTerminalOpen] = useState(false)
+  const [termHeight, setTermHeight] = useState(260)
+
+  // Resize refs
+  const leftPanelRef = useRef<HTMLElement>(null)
+  const midPanelRef = useRef<HTMLDivElement>(null)
+  const chatPanelRef = useRef<HTMLElement>(null)
+  const isDraggingLeft = useRef(false)
+  const isDraggingMid = useRef(false)
+  const isDraggingTerm = useRef(false)
+  const dragStartX = useRef(0)
+  const dragStartY = useRef(0)
+  const dragStartW = useRef(0)
+  const dragStartH = useRef(0)
+
   // Slash command autocomplete
   const [slashSuggestions, setSlashSuggestions] = useState<typeof SLASH_COMMANDS>([])
   const [selectedSuggestion, setSelectedSuggestion] = useState(0)
@@ -291,7 +323,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   // Apply settings to CSS
   useEffect(() => {
     document.documentElement.style.setProperty('--font-size', `${settings.fontSize}px`)
-    document.documentElement.style.setProperty('--ui-zoom', String(SCALE_ZOOM[settings.uiScale] ?? 1.0))
+    document.documentElement.style.zoom = String(SCALE_ZOOM[settings.uiScale] ?? 1.0)
     saveSettings(settings)
   }, [settings])
 
@@ -304,6 +336,64 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  // Resize drag handlers
+  useEffect(() => {
+    function onMouseMove(e: MouseEvent) {
+      if (isDraggingLeft.current) {
+        setLeftWidth(Math.max(120, Math.min(600, dragStartW.current + e.clientX - dragStartX.current)))
+      }
+      if (isDraggingMid.current) {
+        setMidWidth(Math.max(200, Math.min(1200, dragStartW.current + e.clientX - dragStartX.current)))
+      }
+      if (isDraggingTerm.current) {
+        setTermHeight(Math.max(100, Math.min(800, dragStartH.current + dragStartY.current - e.clientY)))
+      }
+    }
+    function onMouseUp() {
+      isDraggingLeft.current = false
+      isDraggingMid.current = false
+      isDraggingTerm.current = false
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+    }
+  }, [])
+
+  // Ctrl+wheel — zoom content inside panel (not resize the div)
+  useEffect(() => {
+    function onWheel(e: WheelEvent) {
+      if (!e.ctrlKey) return
+      const t = e.target as Element
+      const zoomIn = e.deltaY < 0
+      if (leftPanelRef.current?.contains(t)) {
+        e.preventDefault()
+        setLeftZoom(z => Math.round(Math.max(0.5, Math.min(2.0, z + (zoomIn ? 0.1 : -0.1))) * 10) / 10)
+      } else if (midPanelRef.current?.contains(t)) {
+        e.preventDefault()
+        setMidFontSize(f => Math.max(8, Math.min(28, f + (zoomIn ? 1 : -1))))
+      }
+    }
+    window.addEventListener('wheel', onWheel, { passive: false })
+    return () => window.removeEventListener('wheel', onWheel)
+  }, [])
+
+  // Ctrl+T toggle terminal
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.ctrlKey && e.key === 't') {
+        e.preventDefault()
+        setTerminalOpen(v => !v)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
 
   async function checkBackend(attempt = 0) {
     try {
@@ -502,6 +592,10 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
       await runScan('folder', dir)
       return
     }
+    if (msg.startsWith('/terminal')) {
+      setTerminalOpen(true)
+      return
+    }
 
     if (!backendOk) { addSystem('Backend not running.'); return }
 
@@ -601,116 +695,180 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className={`ide${openFile ? ' ide-three-panel' : ''}`}>
-      {/* Left panel */}
-      <aside className="left-panel">
-        <div className="sidebar-header">
-          <span className="logo">Code LM</span>
-          <span className={`dot ${backendOk ? 'green' : 'red'}`} title={backendOk ? 'Backend connected' : 'Backend offline'} />
-        </div>
-
-        <div className="panel-tabs">
-          <button className={`panel-tab ${leftTab === 'files' ? 'active' : ''}`} onClick={() => setLeftTab('files')}>Files</button>
-          <button className={`panel-tab ${leftTab === 'chats' ? 'active' : ''}`} onClick={() => setLeftTab('chats')}>Chats</button>
-        </div>
-
-        {leftTab === 'files' && <FileTreePanel rootPath={rootPath} onFileOpen={handleFileOpen} />}
-
-        {leftTab === 'chats' && (
-          <>
-            <div className="sessions-label">Chats</div>
-            <div className="sessions-list">
-              {sessions.map(s => (
-                <div
-                  key={s.id}
-                  className={`session-item ${s.id === currentSessionId ? 'active' : ''}`}
-                  onClick={() => switchSession(s.id)}
-                >
-                  <span className="session-title">{s.title || 'New chat'}</span>
-                  <button
-                    className="delete-btn"
-                    onClick={e => { e.stopPropagation(); removeSession(s.id) }}
-                    title="Delete chat"
-                  >&#10005;</button>
-                </div>
-              ))}
-            </div>
-            <button className="new-chat-btn" onClick={newSession}>+ New Chat</button>
-          </>
-        )}
-      </aside>
-
-      {/* File content panel (middle) */}
-      {openFile && (
-        <FileContentPanel file={openFile} onClose={() => setOpenFile(null)} />
-      )}
-
-      {/* Main chat area */}
-      <main className="chat-area">
-        {/* Toolbar */}
-        <div className="toolbar">
-          <div className="toolbar-title">{projectName}</div>
-          <div className="toolbar-actions">
-            {auth?.apiKey ? (
-              <div className="auth-indicator" onClick={() => setShowAuth(true)} title="API Key connected">
-                <span className="auth-dot connected" />
-                <span className="auth-label">My Key</span>
-              </div>
-            ) : (
-              <div className="credits-indicator" onClick={() => setShowAuth(true)} title="Credits balance">
-                <span className="credits-icon">{'\uD83D\uDCB3'}</span>
-                <span className="credits-label">{credits.balance} cr</span>
-              </div>
-            )}
-            <button className="toolbar-btn" onClick={() => setShowHelp(true)} title="Help">?</button>
-            <button className="toolbar-btn" onClick={() => setShowSettings(true)} title="Settings">&#9881;</button>
+    <div className="ide-outer">
+      <div className="ide-panels">
+        {/* Left panel */}
+        <aside
+          className="left-panel"
+          ref={leftPanelRef}
+          style={{ width: leftWidth, flexShrink: 0 }}
+        >
+          <div className="sidebar-header">
+            <span className="logo">Code LM</span>
+            <span className={`dot ${backendOk ? 'green' : 'red'}`} title={backendOk ? 'Backend connected' : 'Backend offline'} />
           </div>
-        </div>
 
-        <div className="messages">
-          {messages.map(m => (
-            <MessageBubble key={m.id} message={m} />
-          ))}
-          <div ref={messagesEndRef} />
-        </div>
+          <div className="panel-tabs">
+            <button className={`panel-tab ${leftTab === 'files' ? 'active' : ''}`} onClick={() => setLeftTab('files')}>Files</button>
+            <button className={`panel-tab ${leftTab === 'chats' ? 'active' : ''}`} onClick={() => setLeftTab('chats')}>Chats</button>
+          </div>
 
-        {statusLine && <div className="status-line">{statusLine}</div>}
+          {leftTab === 'files' && (
+            <div style={{ zoom: leftZoom, flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+              <FileTreePanel rootPath={rootPath} onFileOpen={handleFileOpen} />
+            </div>
+          )}
 
-        <div className="input-bar">
-          <div className="input-wrapper">
-            {slashSuggestions.length > 0 && (
-              <div className="slash-dropdown">
-                {slashSuggestions.map((s, i) => (
+          {leftTab === 'chats' && (
+            <>
+              <div className="sessions-label">Chats</div>
+              <div className="sessions-list">
+                {sessions.map(s => (
                   <div
-                    key={s.command}
-                    className={`slash-item ${i === selectedSuggestion ? 'slash-item-selected' : ''}`}
-                    onMouseDown={e => { e.preventDefault(); selectSlashCommand(s.command) }}
-                    onMouseEnter={() => setSelectedSuggestion(i)}
+                    key={s.id}
+                    className={`session-item ${s.id === currentSessionId ? 'active' : ''}`}
+                    onClick={() => switchSession(s.id)}
                   >
-                    <span className="slash-cmd">{s.command}</span>
-                    <span className="slash-desc">{s.description}</span>
+                    <span className="session-title">{s.title || 'New chat'}</span>
+                    <button
+                      className="delete-btn"
+                      onClick={e => { e.stopPropagation(); removeSession(s.id) }}
+                      title="Delete chat"
+                    >&#10005;</button>
                   </div>
                 ))}
               </div>
-            )}
-            <input
-              ref={inputRef}
-              className="chat-input"
-              value={input}
-              onChange={e => {
-                setInput(e.target.value)
-                updateSlashSuggestions(e.target.value)
+              <button className="new-chat-btn" onClick={newSession}>+ New Chat</button>
+            </>
+          )}
+        </aside>
+
+        {/* Drag handle: left | mid/chat */}
+        <div
+          className="panel-divider panel-divider-v"
+          onMouseDown={e => {
+            isDraggingLeft.current = true
+            dragStartX.current = e.clientX
+            dragStartW.current = leftWidth
+            document.body.style.cursor = 'col-resize'
+            document.body.style.userSelect = 'none'
+          }}
+        />
+
+        {/* File content panel (middle) */}
+        {openFile && (
+          <>
+            <div
+              ref={midPanelRef}
+              style={{ width: midWidth, flexShrink: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
+            >
+              <FileContentPanel file={openFile} onClose={() => setOpenFile(null)} fontSize={midFontSize} />
+            </div>
+            <div
+              className="panel-divider panel-divider-v"
+              onMouseDown={e => {
+                isDraggingMid.current = true
+                dragStartX.current = e.clientX
+                dragStartW.current = midWidth
+                document.body.style.cursor = 'col-resize'
+                document.body.style.userSelect = 'none'
               }}
-              onKeyDown={handleInputKeyDown}
-              placeholder="/full-scan, /auto-scan, /package-scan, or just ask..."
-              disabled={busy}
             />
+          </>
+        )}
+
+        {/* Main chat area */}
+        <main className="chat-area" ref={chatPanelRef}>
+          {/* Toolbar */}
+          <div className="toolbar">
+            <div className="toolbar-title">{projectName}</div>
+            <div className="toolbar-actions">
+              {auth?.apiKey ? (
+                <div className="auth-indicator" onClick={() => setShowAuth(true)} title="API Key connected">
+                  <span className="auth-dot connected" />
+                  <span className="auth-label">My Key</span>
+                </div>
+              ) : (
+                <div className="credits-indicator" onClick={() => setShowAuth(true)} title="Credits balance">
+                  <span className="credits-icon">{'\uD83D\uDCB3'}</span>
+                  <span className="credits-label">{credits.balance} cr</span>
+                </div>
+              )}
+              <button className="toolbar-btn" onClick={() => setShowHelp(true)} title="Help">?</button>
+              <button className="toolbar-btn" onClick={() => setShowSettings(true)} title="Settings">&#9881;</button>
+              <button
+                className={`toolbar-btn${terminalOpen ? ' toolbar-btn-active' : ''}`}
+                onClick={() => setTerminalOpen(v => !v)}
+                title="Terminal (Ctrl+T)"
+              >&#9000;</button>
+            </div>
           </div>
-          <button className="send-btn" onClick={send} disabled={busy || !input.trim()}>
-            {busy ? '...' : 'Send'}
-          </button>
-        </div>
-      </main>
+
+          <div className="messages">
+            {messages.map(m => (
+              <MessageBubble key={m.id} message={m} />
+            ))}
+            <div ref={messagesEndRef} />
+          </div>
+
+          {statusLine && <div className="status-line">{statusLine}</div>}
+
+          <div className="input-bar">
+            <div className="input-wrapper">
+              {slashSuggestions.length > 0 && (
+                <div className="slash-dropdown">
+                  {slashSuggestions.map((s, i) => (
+                    <div
+                      key={s.command}
+                      className={`slash-item ${i === selectedSuggestion ? 'slash-item-selected' : ''}`}
+                      onMouseDown={e => { e.preventDefault(); selectSlashCommand(s.command) }}
+                      onMouseEnter={() => setSelectedSuggestion(i)}
+                    >
+                      <span className="slash-cmd">{s.command}</span>
+                      <span className="slash-desc">{s.description}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <input
+                ref={inputRef}
+                className="chat-input"
+                value={input}
+                onChange={e => {
+                  setInput(e.target.value)
+                  updateSlashSuggestions(e.target.value)
+                }}
+                onKeyDown={handleInputKeyDown}
+                placeholder="/full-scan, /auto-scan, /package-scan, or just ask..."
+                disabled={busy}
+              />
+            </div>
+            <button className="send-btn" onClick={send} disabled={busy || !input.trim()}>
+              {busy ? '...' : 'Send'}
+            </button>
+          </div>
+        </main>
+      </div>
+
+      {/* Terminal panel */}
+      {terminalOpen && (
+        <>
+          <div
+            className="panel-divider panel-divider-h"
+            onMouseDown={e => {
+              isDraggingTerm.current = true
+              dragStartY.current = e.clientY
+              dragStartH.current = termHeight
+              document.body.style.cursor = 'row-resize'
+              document.body.style.userSelect = 'none'
+            }}
+          />
+          <TerminalPanel
+            onClose={() => setTerminalOpen(false)}
+            style={{ height: termHeight, flexShrink: 0 }}
+          />
+        </>
+      )}
 
       {/* Settings modal */}
       {showSettings && (

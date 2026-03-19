@@ -21,16 +21,19 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* height:100% chain ensures zoom on <html> works without overflow */
+html { height: 100%; overflow: hidden; }
+
 body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-mono);
   font-size: 13px;
-  height: 100vh;
+  height: 100%;
   overflow: hidden;
 }
 
-#root { height: 100vh; display: flex; }
+#root { height: 100%; display: flex; }
 
 /* ── Interface scale ───────────────────────────────────────────────────── */
 
@@ -41,7 +44,7 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  height: 100vh;
+  height: 100%;
   gap: 16px;
   padding: 32px;
   width: 100%;
@@ -103,7 +106,7 @@ body {
 .ide-outer {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100%;
   flex: 1;
   width: 100%;
   min-width: 0;
@@ -1019,7 +1022,6 @@ body {
   flex-direction: column;
   background: #1a1a1a;
   border-top: 1px solid var(--border);
-  overflow: hidden;
   flex-shrink: 0;
 }
 
@@ -1107,8 +1109,9 @@ body {
 
 .terminal-shell-dropdown {
   position: absolute;
-  top: 100%;
+  bottom: 100%;
   left: 0;
+  margin-bottom: 2px;
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: 4px;
