@@ -30,6 +30,7 @@ jobs:
         with:
           name: frontend-dist
           path: backend/static/
+          retention-days: 1
 
   build-backend:
     name: Build Python backend (${{ matrix.os }})
@@ -72,6 +73,7 @@ jobs:
         with:
           name: backend-bin-${{ matrix.os }}
           path: backend/dist/engramai-backend/
+          retention-days: 1
 
   build-electron:
     name: Build Electron (${{ matrix.os }})
@@ -121,6 +123,7 @@ jobs:
         with:
           name: engramai-${{ matrix.os }}
           if-no-files-found: ignore
+          retention-days: 1
           path: |
             electron/dist/*.exe
             electron/dist/*.dmg
