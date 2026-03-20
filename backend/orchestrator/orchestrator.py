@@ -5,6 +5,7 @@ import time
 from collections.abc import AsyncGenerator
 from fastapi import HTTPException
 from llm.factory import get_provider
+from billing import budget as _budget
 
 logger = logging.getLogger(__name__)
 
@@ -686,6 +687,7 @@ async def chat_stream(
     api_key: str = "",
     provider_name: str = "anthropic",
     model: str | None = None,
+    budget_usd: float = 999.0,
 ) -> AsyncGenerator[str, None]:
     """Stream the orchestrator response as Server-Sent Events.
 
@@ -751,6 +753,8 @@ async def chat_stream(
     tool_round = 0
     # Smart model routing: start with Haiku, escalate to Sonnet for code analysis
     current_model = "claude-haiku-4-5-20251001" if provider_name.lower() == "anthropic" else resolved_model
+    # Budget tracking — starts at caller-supplied value, decremented per turn
+    remaining_budget = budget_usd
 
     # Session-level tool result cache with TTL — prevents duplicate API calls
     # across the entire session, not just within a single request.
@@ -763,10 +767,17 @@ async def chat_stream(
     system_param = _system_param(provider_name, system_prompt_with_context)
 
     while True:
+        # Reduce max_tokens when balance is exhausted to encourage a quick finish
+        max_tokens = (
+            _budget.FINISH_QUICKLY_MAX_TOKENS
+            if _budget.should_finish_quickly(remaining_budget)
+            else 4096
+        )
+
         # Open a streaming request to Anthropic
         with client.messages.stream(
             model=current_model,
-            max_tokens=4096,
+            max_tokens=max_tokens,
             system=system_param,
             tools=TOOLS,
             messages=messages,
@@ -806,6 +817,39 @@ async def chat_stream(
                 elif event.type == "message_delta":
                     stop_reason = getattr(event.delta, "stop_reason", "end_turn") or "end_turn"
 
+            # ── Budget accounting (inside the `with` block while stream is still open)
+            # IMPORTANT: this try/except must NEVER silently swallow failures.
+            # If usage is missing we log a WARNING so the operator knows money
+            # may have been spent without being tracked.  We don't crash the
+            # stream — the user already received the response — but the event
+            # is recorded so it can be investigated and reconciled.
+            try:
+                final_msg = stream.get_final_message()
+                u = final_msg.usage
+                call_cost = _budget.cost_usd(
+                    model=current_model,
+                    input_tokens=u.input_tokens,
+                    output_tokens=u.output_tokens,
+                    cache_read_tokens=getattr(u, "cache_read_input_tokens", 0) or 0,
+                    cache_write_tokens=getattr(u, "cache_creation_input_tokens", 0) or 0,
+                )
+                remaining_budget -= call_cost
+                yield _sse({"cost_usd": round(call_cost, 6), "balance_usd": round(remaining_budget, 6)})
+                logger.debug(
+                    "chat_stream [%s] turn cost: $%.6f | model: %s | in=%d out=%d | balance: $%.4f",
+                    project_id, call_cost, current_model,
+                    u.input_tokens, u.output_tokens, remaining_budget,
+                )
+            except Exception as exc:
+                # Stream was interrupted (client disconnect, timeout, API error)
+                # before usage was finalised.  Budget NOT decremented — conservative:
+                # better to under-charge than to silently lose tracking.
+                logger.warning(
+                    "chat_stream [%s]: usage unavailable after turn — cost NOT tracked. "
+                    "model=%s reason=%s",
+                    project_id, current_model, exc,
+                )
+
         # Parse tool_use blocks from collected content
         for block in collected_content_blocks:
             if block["type"] == "tool_use":
@@ -834,6 +878,15 @@ async def chat_stream(
                 await save_message(session_id, "assistant", collected_text)
             yield _sse({"chunk": "\n\n⚠ Reached maximum tool-call depth — partial results shown above."})
             yield _sse({"done": True})
+            return
+
+        # ── Budget gate: don't start another tool round if overdraft floor reached
+        if not _budget.can_start_task(remaining_budget):
+            logger.info("chat_stream [%s]: budget exhausted (%.4f) — stopping after current turn", project_id, remaining_budget)
+            if session_id and collected_text:
+                await save_message(session_id, "assistant", collected_text)
+            yield _sse({"chunk": "\n\n⚠ Budget limit reached — task stopped to protect your balance."})
+            yield _sse({"done": True, "budget_exhausted": True})
             return
 
         # Tool loop: append assistant message, execute tools, continue

@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import {
+  canSendMessage,
   chatStream,
   clearAuth,
   createSession,
-  deductCredit,
+  CREDIT_PLANS,
   deleteSession,
   fetchFileContent,
   fetchFileTree,
@@ -532,6 +533,9 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   // Settings
   const [settings, setSettings] = useState<CodeLMSettings>(loadSettings)
   const [showSettings, setShowSettings] = useState(false)
+  const [settingsTab, setSettingsTab] = useState<'general' | 'account'>('general')
+  const [settingsApiKey, setSettingsApiKey] = useState('')
+  const [settingsAccountTab, setSettingsAccountTab] = useState<'key' | 'credits'>('credits')
 
   // Help modal
   const [showHelp, setShowHelp] = useState(false)
@@ -547,7 +551,6 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
 
   // Auth: own key OR credits
   const [auth, setAuth] = useState<AuthConfig | null>(loadAuth)
-  const [showAuth, setShowAuth] = useState(false)
   const [credits, setCredits] = useState<CreditsConfig>(loadCredits)
 
   // Delete chat confirmation
@@ -619,7 +622,9 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
         setLeftWidth(Math.max(120, Math.min(600, dragStartW.current + e.clientX - dragStartX.current)))
       }
       if (isDraggingMid.current) {
-        setMidWidth(Math.max(200, Math.min(1200, dragStartW.current + e.clientX - dragStartX.current)))
+        const chatMinPx = Math.floor(window.innerWidth * 0.20)
+        const maxMid = window.innerWidth - leftWidth - chatMinPx - 8 // 8px for 2 dividers
+        setMidWidth(Math.max(200, Math.min(maxMid, dragStartW.current + e.clientX - dragStartX.current)))
       }
       if (isDraggingTerm.current) {
         setTermHeight(Math.max(100, Math.min(800, dragStartH.current + dragStartY.current - e.clientY)))
@@ -887,13 +892,14 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   async function send() {
     if (busy || !input.trim()) return
 
-    // Gate: need either own API key or credits
+    // Gate: need either own API key or sufficient balance
     if (!auth?.apiKey) {
-      if (!deductCredit()) {
-        setShowAuth(true)
+      if (!canSendMessage(credits.balance_usd)) {
+        setSettingsAccountTab('credits')
+        setSettingsTab('account')
+        setShowSettings(true)
         return
       }
-      setCredits(loadCredits())
     }
     let msg = input.trim()
     setInput('')
@@ -962,6 +968,10 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
         onAgent: name => {
           agentLabel = name
           setStatusLine(`[${name}] thinking...`)
+        },
+        onCost: (_cost, newBalance) => {
+          setCredits({ balance_usd: newBalance })
+          saveCredits({ balance_usd: newBalance })
         },
         onFileEdit: proposal => {
           if (acceptAll) {
@@ -1112,14 +1122,14 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
             <div className="toolbar-title">{projectName}</div>
             <div className="toolbar-actions">
               {auth?.apiKey ? (
-                <div className="auth-indicator" onClick={() => setShowAuth(true)} title="API Key connected">
+                <div className="auth-indicator" onClick={() => { setSettingsApiKey(auth.apiKey || ''); setSettingsAccountTab('key'); setSettingsTab('account'); setShowSettings(true) }} title="API Key connected">
                   <span className="auth-dot connected" />
                   <span className="auth-label">My Key</span>
                 </div>
               ) : (
-                <div className="credits-indicator" onClick={() => setShowAuth(true)} title="Credits balance">
+                <div className="credits-indicator" onClick={() => { setSettingsApiKey(''); setSettingsAccountTab('credits'); setSettingsTab('account'); setShowSettings(true) }} title="API budget balance">
                   <span className="credits-icon">{'\uD83D\uDCB3'}</span>
-                  <span className="credits-label">{credits.balance} cr</span>
+                  <span className="credits-label">${(credits.balance_usd ?? 0).toFixed(2)}</span>
                 </div>
               )}
               <button className="toolbar-btn" onClick={() => setShowHelp(true)} title="Help">?</button>
@@ -1206,31 +1216,105 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
               <span className="modal-title">Settings</span>
               <button className="modal-close" onClick={() => setShowSettings(false)}>&#10005;</button>
             </div>
+            <div className="auth-tabs">
+              <button className={`auth-tab ${settingsTab === 'general' ? 'active' : ''}`} onClick={() => setSettingsTab('general')}>General</button>
+              <button className={`auth-tab ${settingsTab === 'account' ? 'active' : ''}`} onClick={() => setSettingsTab('account')}>Account</button>
+            </div>
             <div className="modal-body">
-              <div className="setting-row">
-                <label>Font Size: {settings.fontSize}px</label>
-                <input
-                  type="range"
-                  min={12}
-                  max={20}
-                  value={settings.fontSize}
-                  onChange={e => setSettings(s => ({ ...s, fontSize: Number(e.target.value) }))}
-                />
-              </div>
-              <div className="setting-row">
-                <label>Interface Scale: {Math.round((SCALE_ZOOM[settings.uiScale] ?? 1) * 100)}%</label>
-                <div className="scale-options">
-                  {[1, 2, 3, 4, 5, 6].map(n => (
-                    <button
-                      key={n}
-                      className={`scale-btn ${settings.uiScale === n ? 'scale-btn-active' : ''}`}
-                      onClick={() => setSettings(s => ({ ...s, uiScale: n }))}
-                    >
-                      {n}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              {settingsTab === 'general' && (
+                <>
+                  <div className="setting-row">
+                    <label>Font Size: {settings.fontSize}px</label>
+                    <input
+                      type="range"
+                      min={12}
+                      max={20}
+                      value={settings.fontSize}
+                      onChange={e => setSettings(s => ({ ...s, fontSize: Number(e.target.value) }))}
+                    />
+                  </div>
+                  <div className="setting-row">
+                    <label>Interface Scale: {Math.round((SCALE_ZOOM[settings.uiScale] ?? 1) * 100)}%</label>
+                    <div className="scale-options">
+                      {[1, 2, 3, 4, 5, 6].map(n => (
+                        <button
+                          key={n}
+                          className={`scale-btn ${settings.uiScale === n ? 'scale-btn-active' : ''}`}
+                          onClick={() => setSettings(s => ({ ...s, uiScale: n }))}
+                        >
+                          {n}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
+              {settingsTab === 'account' && (
+                <>
+                  <div className="auth-tabs" style={{ marginBottom: '12px' }}>
+                    <button className={`auth-tab ${settingsAccountTab === 'key' ? 'active' : ''}`} onClick={() => setSettingsAccountTab('key')}>My API Key</button>
+                    <button className={`auth-tab ${settingsAccountTab === 'credits' ? 'active' : ''}`} onClick={() => setSettingsAccountTab('credits')}>Credits</button>
+                  </div>
+                  {settingsAccountTab === 'key' && (
+                    <>
+                      <p style={{ fontSize: '12px', color: 'var(--text-dim)', marginBottom: '16px' }}>
+                        Use your own Anthropic (Claude) API key. No credits needed.
+                      </p>
+                      <input
+                        type="password"
+                        className="auth-input"
+                        placeholder="sk-ant-..."
+                        value={settingsApiKey}
+                        onChange={e => setSettingsApiKey(e.target.value)}
+                        autoFocus
+                      />
+                      <a className="auth-link" href="https://console.anthropic.com" target="_blank" rel="noopener noreferrer">
+                        Get your Anthropic API key &rarr;
+                      </a>
+                      <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
+                        <button
+                          className="auth-connect-btn"
+                          disabled={!settingsApiKey.trim()}
+                          onClick={() => { const cfg = { apiKey: settingsApiKey.trim() }; saveAuth(cfg); setAuth(cfg) }}
+                        >
+                          {auth?.apiKey ? 'Update Key' : 'Connect'}
+                        </button>
+                        {auth?.apiKey && (
+                          <button className="auth-connect-btn" style={{ background: '#555' }} onClick={() => { clearAuth(); setAuth(null) }}>
+                            Disconnect
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  )}
+                  {settingsAccountTab === 'credits' && (
+                    <>
+                      <div className="credits-balance">
+                        <div className="credits-amount">{'\uD83D\uDCB3'} ${(credits.balance_usd ?? 0).toFixed(4)}</div>
+                        <div className="credits-unit">API budget remaining</div>
+                        <div className={`credits-status ${(credits.balance_usd ?? 0) > 0 ? 'ok' : 'empty'}`}>
+                          {(credits.balance_usd ?? 0) > 0 ? 'Budget active' : 'Budget empty — top up to continue'}
+                        </div>
+                      </div>
+                      <div className="credits-plans">
+                        {CREDIT_PLANS.map(plan => (
+                          <button
+                            key={plan.price}
+                            className="credits-plan-btn"
+                            onClick={() => { const c = { balance_usd: (credits.balance_usd ?? 0) + plan.api_budget }; saveCredits(c); setCredits(c) }}
+                          >
+                            <span className="plan-price">${plan.price}</span>
+                            <span className="plan-credits">${plan.api_budget.toFixed(2)} budget</span>
+                          </button>
+                        ))}
+                      </div>
+                      <div className="credits-note">
+                        Billed per actual token usage. Current task finishes even if budget hits $0 (up to $1 buffer).
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -1277,18 +1361,6 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
             </div>
           </div>
         </div>
-      )}
-
-      {/* Auth modal */}
-      {showAuth && (
-        <AuthModal
-          auth={auth}
-          onSaveKey={(config) => { saveAuth(config); setAuth(config); setShowAuth(false) }}
-          onDisconnect={() => { clearAuth(); setAuth(null); setShowAuth(false) }}
-          credits={credits}
-          onCreditsChange={(c) => { saveCredits(c); setCredits(c) }}
-          onClose={() => setShowAuth(false)}
-        />
       )}
 
       {/* Diff dialog */}
@@ -1355,123 +1427,3 @@ function MessageBubble({ message }: { message: DisplayMessage }) {
   )
 }
 
-// ── AuthModal ─────────────────────────────────────────────────────────────────
-
-function AuthModal({
-  auth,
-  onSaveKey,
-  onDisconnect,
-  credits,
-  onCreditsChange,
-  onClose,
-}: {
-  auth: AuthConfig | null
-  onSaveKey: (config: AuthConfig) => void
-  onDisconnect: () => void
-  credits: CreditsConfig
-  onCreditsChange: (c: CreditsConfig) => void
-  onClose: () => void
-}) {
-  const [tab, setTab] = useState<'key' | 'credits'>(auth?.apiKey ? 'key' : 'credits')
-  const [apiKey, setApiKey] = useState(auth?.apiKey || '')
-
-  const purchaseCredits = (amount: number) => {
-    onCreditsChange({ balance: credits.balance + amount })
-  }
-
-  return (
-    <div className="modal-overlay">
-      <div className="modal auth-modal" onClick={e => e.stopPropagation()}>
-        <div className="modal-header">
-          <span className="modal-title">Connect your AI</span>
-          <button className="modal-close" onClick={onClose} title="Close">&#10005;</button>
-        </div>
-
-        <div className="auth-tabs">
-          <button className={`auth-tab ${tab === 'key' ? 'active' : ''}`} onClick={() => setTab('key')}>
-            My API Key
-          </button>
-          <button className={`auth-tab ${tab === 'credits' ? 'active' : ''}`} onClick={() => setTab('credits')}>
-            Code LM Credits
-          </button>
-        </div>
-
-        <div className="modal-body">
-          {tab === 'key' && (
-            <>
-              <p style={{ fontSize: '12px', color: 'var(--text-dim)', marginBottom: '16px' }}>
-                Use your own Anthropic (Claude) API key. No credits needed.
-              </p>
-              <input
-                type="password"
-                className="auth-input"
-                placeholder="sk-ant-..."
-                value={apiKey}
-                onChange={e => setApiKey(e.target.value)}
-                autoFocus
-              />
-              <a
-                className="auth-link"
-                href="https://console.anthropic.com"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                Get your Anthropic API key &rarr;
-              </a>
-              <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
-                <button
-                  className="auth-connect-btn"
-                  disabled={!apiKey.trim()}
-                  onClick={() => onSaveKey({ apiKey: apiKey.trim() })}
-                >
-                  {auth?.apiKey ? 'Update Key' : 'Connect'}
-                </button>
-                {auth?.apiKey && (
-                  <button className="auth-connect-btn" style={{ background: '#555' }} onClick={onDisconnect}>
-                    Disconnect
-                  </button>
-                )}
-              </div>
-            </>
-          )}
-
-          {tab === 'credits' && (
-            <>
-              <div className="credits-balance">
-                <div className="credits-amount">{'\uD83D\uDCB3'} {credits.balance}</div>
-                <div className="credits-unit">credits</div>
-                <div className={`credits-status ${credits.balance > 0 ? 'ok' : 'empty'}`}>
-                  {credits.balance > 0 ? 'Credits active' : 'No credits — top up to start chatting'}
-                </div>
-              </div>
-              <div className="credits-plans">
-                <button className="credits-plan-btn" onClick={() => purchaseCredits(500)}>
-                  <span className="plan-price">$5</span>
-                  <span className="plan-credits">500 credits</span>
-                </button>
-                <button className="credits-plan-btn" onClick={() => purchaseCredits(1200)}>
-                  <span className="plan-price">$10</span>
-                  <span className="plan-credits">1,200 credits</span>
-                </button>
-                <button className="credits-plan-btn" onClick={() => purchaseCredits(3500)}>
-                  <span className="plan-price">$25</span>
-                  <span className="plan-credits">3,500 credits</span>
-                </button>
-              </div>
-              <div className="credits-note">
-                Credits are consumed per message. 1 message = 2 credits.
-              </div>
-              <button
-                className="credits-start-btn"
-                disabled={credits.balance <= 0}
-                onClick={onClose}
-              >
-                Start chatting {'\u2192'}
-              </button>
-            </>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}

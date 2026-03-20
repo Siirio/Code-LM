@@ -93,14 +93,30 @@ async def chat(
 async def chat_stream(
     request: ChatRequest,
     x_api_key: str = Header(default="", alias="X-Api-Key"),
+    x_budget_balance: float = Header(default=999.0, alias="X-Budget-Balance"),
 ):
     """Stream chat responses as Server-Sent Events.
 
     Returns the same logical response as POST /chat but streamed as SSE:
-      - data: {"chunk": "..."}                    text fragments
-      - data: {"tool": "...", "status": "running"} tool call status
-      - data: {"done": true}                      end of response
+      - data: {"chunk": "..."}                        text fragments
+      - data: {"tool": "...", "status": "running"}    tool call status
+      - data: {"cost_usd": 0.0023, "balance_usd": 14.9977}  per-turn cost
+      - data: {"done": true}                          end of response
+
+    X-Budget-Balance: caller's current USD balance (credits mode only).
+    When the user supplies their own API key the balance is ignored (999).
+
+    SECURITY NOTE (MVP): balance is client-supplied and not verified server-side.
+    A user can send X-Budget-Balance: 999 to bypass the limit.
+    This is acceptable while payments are mocked (localStorage).
+    Before enabling real payments: store balance in the database keyed by a
+    server-issued subscription token, verify it here, and reject requests that
+    exceed the stored balance without relying on the client-sent value.
     """
+    user_key = x_api_key.strip()
+    # Users with their own key have unlimited budget (billed directly to them)
+    budget = 999.0 if user_key else max(x_budget_balance, -999.0)
+
     return StreamingResponse(
         orchestrator_chat_stream(
             project_id=request.project_id,
@@ -108,9 +124,10 @@ async def chat_stream(
             conversation_id=request.conversation_id,
             session_id=request.session_id,
             agent_id=request.agent_id,
-            api_key=_resolve_key(x_api_key),
+            api_key=_resolve_key(user_key),
             provider_name="anthropic",
             model=settings.llm_model or None,
+            budget_usd=budget,
         ),
         media_type="text/event-stream",
         headers={

@@ -22,32 +22,60 @@ export function clearAuth() {
   localStorage.removeItem('codelm_auth')
 }
 
-// ── Credits config (pay-per-message) ─────────────────────────────────────────
+// ── Budget config (real USD — 75% of purchase price goes to API spend) ────────
+//
+// Plan mapping (user pays → API budget):
+//   $5  → $3.75   $10 → $7.50   $20 → $15.00
+//
+// The $1 overdraft rule: tasks already running may spend up to $1 past $0
+// before the server stops them.  New tasks are blocked when balance <= -1.00.
 
 export interface CreditsConfig {
-  balance: number
+  balance_usd: number
 }
 
 const CREDITS_KEY = 'codelm_credits'
-const COST_PER_MESSAGE = 2
+
+// Passthrough ratio: 75% of what the user pays goes to API spend
+const API_RATIO = 0.75
+
+// Plans available at purchase (user-facing price → API budget added)
+export const CREDIT_PLANS: { price: number; api_budget: number; label: string }[] = [
+  { price: 5,  api_budget: 5  * API_RATIO, label: '500 msgs (~$3.75)' },
+  { price: 10, api_budget: 10 * API_RATIO, label: '1,200 msgs (~$7.50)' },
+  { price: 20, api_budget: 20 * API_RATIO, label: '2,500 msgs (~$15.00)' },
+]
 
 export function loadCredits(): CreditsConfig {
   try {
     const raw = localStorage.getItem(CREDITS_KEY)
-    if (raw) return JSON.parse(raw)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      // Migrate old integer-credit format to USD
+      if (typeof parsed.balance === 'number' && parsed.balance_usd === undefined) {
+        return { balance_usd: 0 }
+      }
+      return parsed
+    }
   } catch {}
-  return { balance: 0 }
+  return { balance_usd: 0 }
 }
 
 export function saveCredits(c: CreditsConfig) {
   localStorage.setItem(CREDITS_KEY, JSON.stringify(c))
 }
 
-export function deductCredit(): boolean {
+/** Deduct actual API cost (in USD) from stored balance. Returns updated balance. */
+export function deductCost(cost_usd: number): number {
   const c = loadCredits()
-  if (c.balance <= 0) return false
-  saveCredits({ balance: c.balance - COST_PER_MESSAGE })
-  return true
+  const updated = { balance_usd: Math.round((c.balance_usd - cost_usd) * 1_000_000) / 1_000_000 }
+  saveCredits(updated)
+  return updated.balance_usd
+}
+
+/** True if a new task is allowed to start (above the $1 overdraft floor). */
+export function canSendMessage(balance_usd: number): boolean {
+  return balance_usd > -1.00
 }
 
 function authHeaders(): Record<string, string> {
@@ -210,17 +238,25 @@ export function chatStream(
     onTool: (name: string) => void
     onAgent: (name: string) => void
     onFileEdit: (proposal: FileEditProposal) => void
+    onCost: (cost_usd: number, balance_usd: number) => void
     onDone: () => void
     onError: (err: string) => void
   }
 ): () => void {
   const controller = new AbortController()
+  const auth = loadAuth()
+  const balance = loadCredits().balance_usd
 
   ;(async () => {
     try {
       const res = await fetch(`${BASE}/chat/stream`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders(),
+          // Only send budget header in credits mode (no personal API key)
+          ...(!auth?.apiKey ? { 'X-Budget-Balance': String(balance) } : {}),
+        },
         body: JSON.stringify(params),
         signal: controller.signal,
       })
@@ -250,6 +286,10 @@ export function chatStream(
             else if (event.tool) callbacks.onTool(event.tool)
             else if (event.agent) callbacks.onAgent(event.agent)
             else if (event.file_edit) callbacks.onFileEdit(event.file_edit)
+            else if (event.cost_usd !== undefined) {
+              const newBalance = deductCost(event.cost_usd)
+              callbacks.onCost(event.cost_usd, newBalance)
+            }
             else if (event.done) callbacks.onDone()
           } catch {
             // skip malformed SSE lines

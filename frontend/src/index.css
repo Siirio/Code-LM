@@ -270,7 +270,7 @@ body {
   overflow: hidden;
   background: var(--bg);
   flex: 1;
-  min-width: 0;
+  min-width: 20%;
 }
 
 .messages {

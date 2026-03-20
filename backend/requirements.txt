@@ -17,3 +17,4 @@ httpx==0.27.0
 aiofiles==23.2.1
 tree-sitter==0.22.3
 pgvector==0.2.5
+pywinpty>=2.0.14; sys_platform == "win32"
