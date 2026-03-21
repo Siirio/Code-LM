@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 
+from orchestrator.orchestrator import clear_tool_cache
 from scanner.project_scanner import scan_project
 from storage.memory_service import get_or_create_project, list_sessions, list_personas
 
@@ -41,6 +42,8 @@ async def scan_project_endpoint(request: ScanRequest):
             folder_path=request.folder_path,
             entry_point=request.entry_point,
         )
+        # Graph and file content cached before this scan are now stale
+        clear_tool_cache()
         return ScanResponse(
             project_id=request.project_id,
             status="completed",

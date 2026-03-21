@@ -1,10 +1,10 @@
 ---
 name: Backend Architecture
-description: Key file locations, data flow, component roles, and fragile areas in the EngramAI Python FastAPI backend
+description: Key file locations, data flow, component roles, and fragile areas in the CodeLM Python FastAPI backend
 type: project
 ---
 
-EngramAI backend is a FastAPI app at /mnt/c/EngramAI/backend/.
+CodeLM backend is a FastAPI app at /mnt/c/CodeLM/backend/.
 
 **Entry point:** main.py — mounts /api/v1 router, CORS middleware, /health endpoint.
 
@@ -26,7 +26,7 @@ api/endpoints/chat.py -> orchestrator/orchestrator.py -> llm/factory.py -> llm/<
 - openai==1.30.1 (in venv)
 - fastapi==0.111.0
 
-**LLM provider config (.env at /mnt/c/EngramAI/.env):**
+**LLM provider config (.env at /mnt/c/CodeLM/.env):**
 - LLM_PROVIDER= sets which provider is active
 - OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY all present
 

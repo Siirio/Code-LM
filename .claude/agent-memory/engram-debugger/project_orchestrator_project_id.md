@@ -8,7 +8,7 @@ The orchestrator's `_execute_tool` was reading `project_id` from `tool_input` (w
 
 **Fix applied (2026-03-15):** `_execute_tool` now accepts `project_id` as an explicit third parameter, and `chat()` injects the correct `project_id` into the system prompt so the LLM knows the exact value to use in tool calls. The call-site was updated to pass `project_id` from the outer `chat()` scope.
 
-**File:** `/mnt/c/EngramAI/backend/orchestrator/orchestrator.py`
+**File:** `/mnt/c/CodeLM/backend/orchestrator/orchestrator.py`
 
 **Why:** `ProjectSession.projectId` is computed in Kotlin via `UUID.nameUUIDFromBytes(basePath.toByteArray())` — this is a version-3 UUID derived from the project path. The LLM has no way to know this value without it being told.
 

@@ -28,7 +28,7 @@ def _anthropic_tools_to_openai(tools: list[dict]) -> list:
 
 def _normalize_messages(messages: list[dict], system: str) -> list[dict]:
     """
-    Convert normalized EngramAI message history to OpenAI format.
+    Convert normalized CodeLM message history to OpenAI format.
     OpenAI puts the system prompt as the first message in the array.
     Tool results use role="tool" with tool_call_id.
     """

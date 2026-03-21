@@ -19,7 +19,7 @@ function resourcesDir() {
 }
 
 function backendBinaryPath() {
-  const dir = path.join(resourcesDir(), 'backend-bin', 'engramai-backend')
+  const dir = path.join(resourcesDir(), 'backend-bin', 'codelm-backend')
   if (process.platform === 'win32') return dir + '.exe'
   return dir
 }
@@ -105,9 +105,9 @@ function startBackend(ports) {
   // Pass dynamic ports to backend via environment variables
   const env = { ...process.env }
   if (ports) {
-    env.ENGRAMAI_POSTGRES_PORT = String(ports.postgres)
-    env.ENGRAMAI_NEO4J_URI     = `bolt://localhost:${ports.neo4jBolt}`
-    env.ENGRAMAI_QDRANT_PORT   = String(ports.qdrant)
+    env.CODELM_POSTGRES_PORT = String(ports.postgres)
+    env.CODELM_NEO4J_URI     = `bolt://localhost:${ports.neo4jBolt}`
+    env.CODELM_QDRANT_PORT   = String(ports.qdrant)
   }
 
   backendProcess = spawn(bin, [], { cwd: path.dirname(bin), env })

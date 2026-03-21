@@ -20,6 +20,6 @@ type: project
 - backend/api/endpoints/chat.py: Added typed catches for anthropic.AuthenticationError (401), anthropic.BadRequestError (400, extracts e.body["error"]["message"]), anthropic.RateLimitError (429), anthropic.APIStatusError (502), generic Exception (500 with logger.exception for full traceback).
 - backend/llm/anthropic_provider.py: stop_reason now reads `response.stop_reason or "end_turn"` directly from the API response.
 - clients/intellij/src/.../BackendClient.kt: post() now checks `response.isSuccessful`; on failure it parses `detail` from the JSON body and throws BackendException(statusCode, detail).
-- clients/intellij/src/.../EngramToolWindowFactory.kt: Added BackendException catch branch that shows "EngramAI Error (N): <message>" to the user.
+- clients/intellij/src/.../EngramToolWindowFactory.kt: Added BackendException catch branch that shows "CodeLM Error (N): <message>" to the user.
 
 **Why:** To prevent future errors from being silently swallowed and to make the plugin show actionable messages (e.g. "credit balance too low") instead of generic fallbacks.

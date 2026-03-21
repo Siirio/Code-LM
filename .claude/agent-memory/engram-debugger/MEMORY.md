@@ -1,4 +1,4 @@
-# EngramAI Debugger Memory Index
+# CodeLM Debugger Memory Index
 
 ## Project
 - [Backend Architecture](project_backend_arch.md) — Key file locations, data flow, and fragile areas in the Python backend

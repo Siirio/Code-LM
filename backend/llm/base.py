@@ -20,7 +20,7 @@ class LLMResponse:
 class LLMProvider(ABC):
     """
     Abstract base for all LLM providers.
-    Each provider translates between the normalized EngramAI format
+    Each provider translates between the normalized CodeLM format
     and its own API format.
     """
 

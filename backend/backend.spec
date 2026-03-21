@@ -1,4 +1,4 @@
-# PyInstaller spec for EngramAI backend
+# PyInstaller spec for CodeLM backend
 # Run from backend/ directory: pyinstaller backend.spec
 import os
 
@@ -82,7 +82,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='engramai-backend',
+    name='codelm-backend',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -102,5 +102,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='engramai-backend',
+    name='codelm-backend',
 )

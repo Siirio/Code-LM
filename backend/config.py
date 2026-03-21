@@ -39,13 +39,13 @@ class Settings(BaseSettings):
     llm_model: str = ""              # empty = use provider default
 
     # ── PostgreSQL ─────────────────────────────────────────────────────────────
-    # ENGRAMAI_POSTGRES_PORT is injected by Electron at runtime with the
+    # CODELM_POSTGRES_PORT is injected by Electron at runtime with the
     # dynamically allocated port. Falls back to .env / hardcoded default.
     postgres_host: str = "localhost"
-    postgres_port: int = _env_int("ENGRAMAI_POSTGRES_PORT", 54320)
-    postgres_db: str = "engramai"
-    postgres_user: str = "engramai"
-    postgres_password: str = "engramai"
+    postgres_port: int = _env_int("CODELM_POSTGRES_PORT", 54320)
+    postgres_db: str = "codelm"
+    postgres_user: str = "codelm"
+    postgres_password: str = "codelm"
 
     @property
     def postgres_url(self) -> str:
@@ -55,15 +55,15 @@ class Settings(BaseSettings):
         )
 
     # ── Neo4j ──────────────────────────────────────────────────────────────────
-    # ENGRAMAI_NEO4J_URI is injected by Electron at runtime.
-    neo4j_uri: str = _env_str("ENGRAMAI_NEO4J_URI", "bolt://localhost:54321")
+    # CODELM_NEO4J_URI is injected by Electron at runtime.
+    neo4j_uri: str = _env_str("CODELM_NEO4J_URI", "bolt://localhost:54321")
     neo4j_user: str = "neo4j"
-    neo4j_password: str = "engramai"
+    neo4j_password: str = "codelm"
 
     # ── Qdrant ─────────────────────────────────────────────────────────────────
-    # ENGRAMAI_QDRANT_PORT is injected by Electron at runtime.
+    # CODELM_QDRANT_PORT is injected by Electron at runtime.
     qdrant_host: str = "localhost"
-    qdrant_port: int = _env_int("ENGRAMAI_QDRANT_PORT", 54323)
+    qdrant_port: int = _env_int("CODELM_QDRANT_PORT", 54323)
     qdrant_api_key: str = ""  # empty = no auth (local instance)
 
 

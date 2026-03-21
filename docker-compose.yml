@@ -1,12 +1,12 @@
 services:
   postgres:
     image: pgvector/pgvector:pg16
-    container_name: engramai_postgres
+    container_name: codelm_postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: engramai
-      POSTGRES_USER: engramai
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-engramai}
+      POSTGRES_DB: codelm
+      POSTGRES_USER: codelm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-codelm}
     ports:
       - "54320:5432"
     volumes:
@@ -14,10 +14,10 @@ services:
 
   neo4j:
     image: neo4j:5.20-community
-    container_name: engramai_neo4j
+    container_name: codelm_neo4j
     restart: unless-stopped
     environment:
-      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-engramai}
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-codelm}
       NEO4J_PLUGINS: '["apoc"]'
     ports:
       - "54322:7474"   # Neo4j browser UI
@@ -27,7 +27,7 @@ services:
 
   qdrant:
     image: qdrant/qdrant:v1.13.3
-    container_name: engramai_qdrant
+    container_name: codelm_qdrant
     restart: unless-stopped
     ports:
       - "54323:6333"   # REST + gRPC

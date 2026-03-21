@@ -1,4 +1,4 @@
-# EngramAI — VSCode Extension (future)
+# CodeLM — VSCode Extension (future)
 
 This folder will contain the VSCode extension client.
 It will call the same Python backend HTTP API as the IntelliJ plugin.

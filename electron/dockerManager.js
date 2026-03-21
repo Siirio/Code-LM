@@ -1,10 +1,10 @@
 /**
  * dockerManager.js
  *
- * Orchestrates Docker container lifecycle for EngramAI:
+ * Orchestrates Docker container lifecycle for CodeLM:
  *  1. If containers already running → load saved ports from userData, reuse them
  *  2. Otherwise → find free ports → write runtime compose → docker compose up
- *  3. Save chosen ports to userData/engramai-ports.json for next launch
+ *  3. Save chosen ports to userData/codelm-ports.json for next launch
  *
  * Exports:
  *   startContainers(composeDir, updateLoading) → Promise<Ports>
@@ -18,23 +18,23 @@ const { app }             = require('electron')
 const fs                  = require('fs')
 const path                = require('path')
 
-const { findEngramAIPorts } = require('./portFinder')
+const { findCodeLMPorts } = require('./portFinder')
 const { writeRuntimeCompose } = require('./composeWriter')
 
 const USER_DATA   = () => app.getPath('userData')
-const PORTS_FILE  = () => path.join(USER_DATA(), 'engramai-ports.json')
+const PORTS_FILE  = () => path.join(USER_DATA(), 'codelm-ports.json')
 const RUNTIME_COMPOSE = () => path.join(USER_DATA(), 'docker-compose.runtime.yml')
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function runCompose(composePath, args) {
   return new Promise((resolve, reject) => {
-    execFile('docker', ['compose', '-p', 'engramai', '-f', composePath, ...args],
+    execFile('docker', ['compose', '-p', 'codelm', '-f', composePath, ...args],
       { timeout: 90000 },
       (err, _stdout, stderr) => {
         if (err) {
           // Fall back to legacy docker-compose binary
-          execFile('docker-compose', ['-p', 'engramai', '-f', composePath, ...args],
+          execFile('docker-compose', ['-p', 'codelm', '-f', composePath, ...args],
             { timeout: 90000 },
             (err2, _stdout2, stderr2) => {
               if (err2) reject(new Error(
@@ -59,7 +59,7 @@ function isDockerAvailable() {
 function areContainersRunning() {
   return new Promise(resolve => {
     exec(
-      'docker ps --filter name=engramai_postgres --filter status=running --format {{.Names}}',
+      'docker ps --filter name=codelm_postgres --filter status=running --format {{.Names}}',
       (err, stdout) => resolve(!err && stdout.trim().length > 0)
     )
   })
@@ -87,7 +87,7 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
- * Start EngramAI containers, returning the ports they're bound to.
+ * Start CodeLM containers, returning the ports they're bound to.
  * Runtime compose file is written to userData (always writable, even in Program Files installs).
  *
  * @param {Function} updateLoading  Callback(message) to update the splash screen
@@ -113,7 +113,7 @@ async function startContainers(updateLoading = () => {}) {
 
   // ── Find free ports ────────────────────────────────────────────────────────
   updateLoading('Finding available ports…')
-  const ports = await findEngramAIPorts()
+  const ports = await findCodeLMPorts()
   console.log('[dockerManager] Allocated ports:', ports)
 
   // ── Write runtime compose to userData (writable on all platforms) ──────────
@@ -133,7 +133,7 @@ async function startContainers(updateLoading = () => {}) {
 }
 
 /**
- * Stop EngramAI containers gracefully.
+ * Stop CodeLM containers gracefully.
  * Called on app.before-quit.
  *
  * @param {string} composeDir

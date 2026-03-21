@@ -62,7 +62,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="EngramAI Backend",
+    title="CodeLM Backend",
     description="AI Software Architect — orchestrator and knowledge engine",
     version="0.1.0",
     lifespan=lifespan,

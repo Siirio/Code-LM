@@ -8,7 +8,7 @@ Scan completed and returned HTTP 200, but `get_project_memory` always returned `
 
 **Root cause (Bug 1 — fatal):** `storage/models.py` was never imported before `init_postgres()` called `Base.metadata.create_all`. SQLAlchemy's `DeclarativeBase` registry was empty, so `create_all` created zero tables. All subsequent DB writes either raised a "table does not exist" error (which `get_pg_session` rolled back silently) or the query returned no rows.
 
-**Fix:** Added `import storage.models  # noqa: F401` as the first statement inside `init_postgres()` in `/mnt/c/EngramAI/backend/storage/postgres.py`. This is a side-effect import — the models register themselves with `Base` when the module loads. The import is placed inside the function body (not at module top-level) to avoid a circular import, since `models.py` already imports `Base` from `postgres.py`.
+**Fix:** Added `import storage.models  # noqa: F401` as the first statement inside `init_postgres()` in `/mnt/c/CodeLM/backend/storage/postgres.py`. This is a side-effect import — the models register themselves with `Base` when the module loads. The import is placed inside the function body (not at module top-level) to avoid a circular import, since `models.py` already imports `Base` from `postgres.py`.
 
 **Root cause (Bug 2 — correctness):** `save_memory` in `memory_service.py` called `mem.to_dict()` before `session.flush()`. On a new insert, `updated_at` is `None` until flush triggers the `default=_now` callable. This didn't cause a crash (the model guards with `if self.updated_at else None`), but the returned dict had `updated_at: null` and was built before the write was confirmed.
 

@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM models for EngramAI's PostgreSQL store.
+"""SQLAlchemy ORM models for CodeLM's PostgreSQL store.
 
 Tables:
   projects          — one row per indexed project

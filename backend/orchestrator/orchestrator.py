@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator
 from fastapi import HTTPException
 from llm.factory import get_provider
 from billing import budget as _budget
+from orchestrator.skills import apply_skill
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +26,20 @@ def _select_model(provider_name: str, tool_names_called: list[str], base_model: 
     return "claude-haiku-4-5-20251001"
 
 
-def _system_param(provider_name: str, text: str) -> str | list:
-    """Wrap system prompt with cache_control for Anthropic, plain string otherwise."""
+def _system_param(provider_name: str, static_text: str, dynamic_text: str = "") -> str | list:
+    """Build system parameter with Anthropic prompt caching.
+
+    Only static_text is wrapped with cache_control — it must never contain
+    per-request values (project_id, agent type, persona) so the cache key
+    is stable across all calls with the same base prompt.
+    dynamic_text is appended as a separate non-cached block.
+    """
     if provider_name.lower() == "anthropic":
-        return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
-    return text
+        blocks: list[dict] = [{"type": "text", "text": static_text, "cache_control": {"type": "ephemeral"}}]
+        if dynamic_text:
+            blocks.append({"type": "text", "text": dynamic_text})
+        return blocks
+    return static_text + ("\n\n" + dynamic_text if dynamic_text else "")
 
 
 # Session-level tool result cache with TTL.
@@ -37,7 +47,18 @@ def _system_param(provider_name: str, text: str) -> str | list:
 _session_tool_cache: dict[str, dict[tuple[str, str], tuple[str, float]]] = {}
 _TOOL_CACHE_TTL = 300  # 5 minutes
 
-SYSTEM_PROMPT = """You are EngramAI — an AI Software Architect embedded inside a developer's IDE.
+
+def clear_tool_cache() -> None:
+    """Invalidate all cached tool results.
+
+    Must be called after any project rescan — graph and file content cached
+    before the scan would return stale data for up to _TOOL_CACHE_TTL seconds.
+    """
+    count = len(_session_tool_cache)
+    _session_tool_cache.clear()
+    logger.info("Tool cache cleared after rescan (%d session(s) invalidated)", count)
+
+SYSTEM_PROMPT = """You are CodeLM — an AI Software Architect embedded inside a developer's IDE.
 
 You operate inside a structured system with the following components:
 - Project Memory: persistent knowledge about this project's architecture, modules, rules, and domain entities
@@ -57,7 +78,8 @@ Your behavior:
 - Be concise but precise. Cite file paths and class names when relevant.
 - If project has not been scanned yet, guide the user to run a project scan first.
 - Never use hedging language. Forbidden words and phrases: "presumably", "probably", "likely", "seems to be", "might be", "предположительно", "вероятно", "похоже", or any equivalent. If the data says X, state X as fact. If the data does not say X, state clearly what IS known and what IS NOT known yet. Distinguish explicitly between: (a) data was retrieved and is definitive, (b) data was not retrieved — name exactly which tool returned empty or nothing and state what that means.
-- When query_code_graph returns 0 nodes, say exactly: "Code graph is empty for this project — a scan with the latest version is needed." Do not say the project has not been scanned. Do not speculate about why. Say the graph is empty and a rescan will fix it.
+- When query_code_graph returns status "empty_graph": the graph has 0 nodes. Tell the user the graph is empty and they should run /full-scan. Do not speculate about why.
+- When query_code_graph returns status "no_results": the graph is populated but nothing matched the search term. Do NOT tell the user to rescan. Instead suggest trying a different search term — the message field contains the total node count and a hint.
 - When asked to implement or fix code: always use read_file first to read the current content, then propose changes with propose_file_edit. Never paste raw code blocks as final output for code changes — always use the tool.
 - Available scan modes users can type: /full-scan, /auto-scan <hint>, /package-scan. Mention these when guiding users to scan.
 - EFFICIENCY RULES (critical — you are rate-limited):
@@ -206,7 +228,7 @@ async def _execute_tool(tool_name: str, tool_input: dict, project_id: str) -> st
             return json.dumps({"status": "ok", "memory": mem, "rules": rules})
         return json.dumps({
             "status": "not_indexed",
-            "message": "Project not yet scanned. Run Tools → Scan Project with EngramAI.",
+            "message": "Project not yet scanned. Run Tools → Scan Project with CodeLM.",
             "project_id": project_id,
         })
 
@@ -268,6 +290,36 @@ async def _execute_tool(tool_name: str, tool_input: dict, project_id: str) -> st
         # Compress node records to only essential fields to reduce token usage
         _KEEP_FIELDS = {"name", "file_path", "layer"}
         nodes = [{k: v for k, v in n.items() if k in _KEEP_FIELDS} for n in nodes]
+
+        if not nodes:
+            # Distinguish "graph is empty" from "query matched nothing".
+            # Only run the count query when we actually got 0 results.
+            count_result = await neo4j_client.query(
+                "MATCH (n) WHERE n.project_id = $project_id RETURN count(n) AS total",
+                {"project_id": project_id},
+            )
+            total_graph_nodes = count_result[0]["total"] if count_result else 0
+            if total_graph_nodes == 0:
+                return json.dumps({
+                    "status": "empty_graph",
+                    "query": query_text,
+                    "nodes": [],
+                    "relationships": [],
+                    "total_graph_nodes": 0,
+                    "message": f"Graph is empty for this project. Run /full-scan to index it.",
+                })
+            return json.dumps({
+                "status": "no_results",
+                "query": query_text,
+                "nodes": [],
+                "relationships": [],
+                "total_graph_nodes": total_graph_nodes,
+                "message": (
+                    f"No nodes matched '{query_text}'. "
+                    f"The graph has {total_graph_nodes} indexed nodes — "
+                    f"try a different term (partial name, file name, or module name)."
+                ),
+            })
 
         return json.dumps({
             "status": "ok",
@@ -420,13 +472,21 @@ async def _execute_tool(tool_name: str, tool_input: dict, project_id: str) -> st
             if len(content) > READ_FILE_MAX_CHARS:
                 content = content[:READ_FILE_MAX_CHARS]
                 truncated = True
+            visible_lines = content.count("\n") + 1
             return json.dumps({
                 "status": "ok",
                 "file_path": file_path,
                 "content": content,
                 "lines": line_count,
+                "visible_lines": visible_lines,
                 "truncated": truncated,
-                "note": f"File truncated to {READ_FILE_MAX_CHARS} chars — propose edits based on visible content." if truncated else "",
+                "note": (
+                    f"FILE TRUNCATED: showing lines 1-{visible_lines} of {line_count} total. "
+                    f"DO NOT call propose_file_edit for any code that is not in the visible portion above. "
+                    f"If the target code is beyond line {visible_lines}, use search_files to locate the specific method, "
+                    f"then call read_file again — the tool will show the same range, so ask the user to use /full-scan "
+                    f"or narrow your search to the specific class or function name."
+                ) if truncated else "",
             })
         except Exception as exc:
             return json.dumps({"status": "error", "message": str(exc)})
@@ -467,21 +527,53 @@ Use query_code_graph and get_project_memory extensively before answering.
 Think in terms of modules, layers, and long-term maintainability.
 """
 
+_EXPLAIN_PROMPT = """
+You are acting as the Explanation Agent for this request.
+Focus exclusively on: explaining what existing code does, how it works, and why it is structured that way.
+Read the relevant file(s) first, then explain clearly and concisely.
+Do NOT suggest changes, refactors, or improvements unless explicitly asked.
+Cite file paths and function names from the retrieved content only.
+"""
+
 _INTENT_KEYWORDS: list[tuple[str, list[str]]] = [
     ("debugger",  ["bug", "error", "fix", "broken", "crash", "fail", "exception", "traceback", "issue", "not working", "wrong", "incorrect"]),
     ("codegen",   ["implement", "add", "create", "write", "generate", "build", "make", "new method", "new class", "new endpoint", "scaffold"]),
     ("architect", ["architecture", "design", "structure", "pattern", "refactor", "dependency", "layer", "module", "coupling", "solid", "ddd"]),
+    ("explain",   ["explain", "what is", "what does", "how does", "describe", "show me", "tell me", "walk me through", "what are", "how is"]),
 ]
+
+# When keyword scores tie, higher priority wins.
+# codegen > debugger > architect > explain
+# Rationale: action verbs (implement, fix) signal stronger intent than
+# question words (explain, what is) which often appear in action queries too.
+_AGENT_PRIORITY: dict[str, int] = {
+    "codegen": 4,
+    "debugger": 3,
+    "architect": 2,
+    "explain": 1,
+}
 
 
 def _detect_agent(message: str) -> str:
-    """Return the best-matching sub-agent name based on message keywords."""
+    """Return the best-matching sub-agent based on keyword score + priority tiebreak.
+
+    Scoring: count keyword hits per agent.
+    Tiebreak: codegen > debugger > architect > explain.
+
+    Examples:
+      "explain how to implement auth"  → codegen=1  explain=1  → codegen (priority)
+      "fix the design of the module"   → debugger=1 architect=1 → debugger (priority)
+      "what does the auth bug look like" → explain=1 debugger=2 → debugger (score)
+    """
     lower = message.lower()
-    scores: dict[str, int] = {}
-    for agent, keywords in _INTENT_KEYWORDS:
-        scores[agent] = sum(1 for kw in keywords if kw in lower)
-    best = max(scores, key=lambda k: scores[k])
-    return best if scores[best] > 0 else "main"
+    scores: dict[str, int] = {
+        agent: sum(1 for kw in keywords if kw in lower)
+        for agent, keywords in _INTENT_KEYWORDS
+    }
+    active = {agent: score for agent, score in scores.items() if score > 0}
+    if not active:
+        return "main"
+    return max(active, key=lambda k: (active[k], _AGENT_PRIORITY.get(k, 0)))
 
 
 def _agent_prompt_extension(agent: str) -> str:
@@ -491,6 +583,8 @@ def _agent_prompt_extension(agent: str) -> str:
         return _CODEGEN_PROMPT
     if agent == "architect":
         return _ARCHITECT_PROMPT
+    if agent == "explain":
+        return _EXPLAIN_PROMPT
     return ""
 
 
@@ -585,13 +679,10 @@ async def chat(
         api_key=api_key,
     )
 
-    # Inject the current project_id into the system prompt so the LLM always
-    # supplies the correct value when making tool calls.  Without this the LLM
-    # has no basis for the project_id field and either hallucinates one or omits
-    # it, causing load_memory to query for the wrong (or non-existent) project.
-    system_prompt_with_context = (
-        SYSTEM_PROMPT
-        + f"\n\nCurrent project_id: {project_id}\n"
+    # Dynamic context: project_id + persona — kept separate from the cached
+    # static SYSTEM_PROMPT so the cache key never changes between projects.
+    dynamic_context = (
+        f"\n\nCurrent project_id: {project_id}\n"
         "Always pass this exact project_id value when calling any tool."
     )
 
@@ -599,7 +690,7 @@ async def chat(
     if agent_id:
         persona = await get_persona(agent_id)
         if persona and persona.get("system_prompt_extra"):
-            system_prompt_with_context += f"\n\n{persona['system_prompt_extra']}"
+            dynamic_context += f"\n\n{persona['system_prompt_extra']}"
 
     # Build conversation history from session, with summarization for long histories
     messages: list[dict] = []
@@ -616,7 +707,7 @@ async def chat(
 
     # Agentic loop: keep going until the LLM stops calling tools
     while True:
-        response = provider.chat(messages=messages, tools=TOOLS, system=_system_param(provider_name, system_prompt_with_context))
+        response = provider.chat(messages=messages, tools=TOOLS, system=_system_param(provider_name, SYSTEM_PROMPT, dynamic_context))
 
         if response.stop_reason == "end_turn":
             reply = response.reply or "I processed your request but had no text response."
@@ -724,9 +815,14 @@ async def chat_stream(
     detected_agent = _detect_agent(message)
     yield _sse({"agent": detected_agent, "status": "assigned"})
 
-    system_prompt_with_context = (
-        SYSTEM_PROMPT
-        + f"\n\nCurrent project_id: {project_id}\n"
+    # Filter tools and set graph depth for this skill — narrower context per agent type
+    skill_tools = apply_skill(detected_agent, TOOLS)
+
+    # Dynamic context: project_id + agent extension + persona — kept separate
+    # from the cached static SYSTEM_PROMPT so the cache key is stable across
+    # all projects and agent types, maximising cache hits.
+    dynamic_context = (
+        f"\n\nCurrent project_id: {project_id}\n"
         "Always pass this exact project_id value when calling any tool."
         + _agent_prompt_extension(detected_agent)
     )
@@ -735,7 +831,7 @@ async def chat_stream(
     if agent_id:
         persona = await get_persona(agent_id)
         if persona and persona.get("system_prompt_extra"):
-            system_prompt_with_context += f"\n\n{persona['system_prompt_extra']}"
+            dynamic_context += f"\n\n{persona['system_prompt_extra']}"
 
     # Sub-agents run with fresh context (no history) — main agent uses session history
     messages: list[dict] = []
@@ -763,8 +859,8 @@ async def chat_stream(
         _session_tool_cache[cache_session_key] = {}
     tool_cache = _session_tool_cache[cache_session_key]
 
-    # Wrap system prompt with cache_control for Anthropic
-    system_param = _system_param(provider_name, system_prompt_with_context)
+    # Build system param: static SYSTEM_PROMPT cached, dynamic context uncached
+    system_param = _system_param(provider_name, SYSTEM_PROMPT, dynamic_context)
 
     while True:
         # Reduce max_tokens when balance is exhausted to encourage a quick finish
@@ -779,8 +875,9 @@ async def chat_stream(
             model=current_model,
             max_tokens=max_tokens,
             system=system_param,
-            tools=TOOLS,
+            tools=skill_tools,
             messages=messages,
+            extra_headers={"anthropic-beta": "token-efficient-tools-2025-02-19"},
         ) as stream:
             # Accumulate the full response so we can append it to history
             collected_text = ""
@@ -835,10 +932,14 @@ async def chat_stream(
                 )
                 remaining_budget -= call_cost
                 yield _sse({"cost_usd": round(call_cost, 6), "balance_usd": round(remaining_budget, 6)})
-                logger.debug(
-                    "chat_stream [%s] turn cost: $%.6f | model: %s | in=%d out=%d | balance: $%.4f",
+                logger.info(
+                    "chat_stream [%s] turn cost: $%.6f | model=%s | in=%d out=%d "
+                    "cache_read=%d cache_write=%d | balance: $%.4f",
                     project_id, call_cost, current_model,
-                    u.input_tokens, u.output_tokens, remaining_budget,
+                    u.input_tokens, u.output_tokens,
+                    getattr(u, "cache_read_input_tokens", 0) or 0,
+                    getattr(u, "cache_creation_input_tokens", 0) or 0,
+                    remaining_budget,
                 )
             except Exception as exc:
                 # Stream was interrupted (client disconnect, timeout, API error)

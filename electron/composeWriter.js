@@ -24,12 +24,12 @@ function writeRuntimeCompose(composeDir, ports) {
 services:
   postgres:
     image: pgvector/pgvector:pg16
-    container_name: engramai_postgres
+    container_name: codelm_postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: engramai
-      POSTGRES_USER: engramai
-      POSTGRES_PASSWORD: engramai
+      POSTGRES_DB: codelm
+      POSTGRES_USER: codelm
+      POSTGRES_PASSWORD: codelm
     ports:
       - "${ports.postgres}:5432"
     volumes:
@@ -37,10 +37,10 @@ services:
 
   neo4j:
     image: neo4j:5.20-community
-    container_name: engramai_neo4j
+    container_name: codelm_neo4j
     restart: unless-stopped
     environment:
-      NEO4J_AUTH: neo4j/engramai
+      NEO4J_AUTH: neo4j/codelm
       NEO4J_PLUGINS: '["apoc"]'
     ports:
       - "${ports.neo4jBrowser}:7474"
@@ -50,7 +50,7 @@ services:
 
   qdrant:
     image: qdrant/qdrant:v1.13.3
-    container_name: engramai_qdrant
+    container_name: codelm_qdrant
     restart: unless-stopped
     ports:
       - "${ports.qdrant}:6333"

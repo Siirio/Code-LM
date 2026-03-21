@@ -1,7 +1,7 @@
 /**
  * portFinder.js
  *
- * Finds 4 free TCP ports for EngramAI containers.
+ * Finds 4 free TCP ports for CodeLM containers.
  *
  * Strategy:
  *  - Search range: 40000–49000 (below OS ephemeral range 49152–65535)
@@ -56,7 +56,7 @@ const BLOCKLIST = new Set([
   9090, 9091, 3000,
   // Common Node/React/Vite dev servers
   3001, 4000, 4200, 5000, 5001, 5173, 8000, 8080, 8081, 8888,
-  // EngramAI backend itself
+  // CodeLM backend itself
   8765,
   // Jupyter
   8888, 8889,
@@ -117,13 +117,13 @@ async function findFreePorts(count = 4) {
 }
 
 /**
- * Find ports and return a named object for EngramAI services.
+ * Find ports and return a named object for CodeLM services.
  *
  * @returns {Promise<{postgres: number, neo4jBolt: number, neo4jBrowser: number, qdrant: number}>}
  */
-async function findEngramAIPorts() {
+async function findCodeLMPorts() {
   const [postgres, neo4jBolt, neo4jBrowser, qdrant] = await findFreePorts(4)
   return { postgres, neo4jBolt, neo4jBrowser, qdrant }
 }
 
-module.exports = { findEngramAIPorts, isPortFree }
+module.exports = { findCodeLMPorts, isPortFree }
