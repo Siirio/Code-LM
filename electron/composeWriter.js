@@ -40,7 +40,7 @@ services:
     container_name: codelm_neo4j
     restart: unless-stopped
     environment:
-      NEO4J_AUTH: neo4j/codelm
+      NEO4J_AUTH: neo4j/codelm123
       NEO4J_PLUGINS: '["apoc"]'
     ports:
       - "${ports.neo4jBrowser}:7474"

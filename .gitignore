@@ -1,6 +1,10 @@
 # Environment
 .env
 
+# Local-only full-stack docker setup — never push
+docker-compose.local.yml
+Dockerfile.local
+
 # Auto-generated at Electron startup — never commit
 docker-compose.runtime.yml
 

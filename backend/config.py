@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     # CODELM_NEO4J_URI is injected by Electron at runtime.
     neo4j_uri: str = _env_str("CODELM_NEO4J_URI", "bolt://localhost:54321")
     neo4j_user: str = "neo4j"
-    neo4j_password: str = "codelm"
+    neo4j_password: str = "codelm123"
 
     # ── Qdrant ─────────────────────────────────────────────────────────────────
     # CODELM_QDRANT_PORT is injected by Electron at runtime.

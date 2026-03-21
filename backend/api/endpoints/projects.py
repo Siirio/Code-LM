@@ -1,4 +1,6 @@
 import logging
+import platform
+import re
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -11,6 +13,24 @@ from storage.memory_service import get_or_create_project, list_sessions, list_pe
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _normalize_path(path: str) -> str:
+    """Translate Windows paths to Linux paths when the backend runs on Linux (Docker).
+
+    C:\\Users\\foo\\project  →  /mnt/c/Users/foo/project
+    C:/Users/foo/project    →  /mnt/c/Users/foo/project
+
+    No-op on native Windows or when path is already Linux-style.
+    """
+    if platform.system() == "Windows":
+        return path
+    m = re.match(r'^([A-Za-z]):[/\\](.*)$', path)
+    if m:
+        drive = m.group(1).lower()
+        rest = m.group(2).replace('\\', '/')
+        return f"/mnt/{drive}/{rest}"
+    return path
 
 
 class ScanRequest(BaseModel):
@@ -34,10 +54,11 @@ class ScanResponse(BaseModel):
 
 @router.post("/scan", response_model=ScanResponse)
 async def scan_project_endpoint(request: ScanRequest):
+    root_path = _normalize_path(request.root_path)
     try:
         result = await scan_project(
             project_id=request.project_id,
-            root_path=request.root_path,
+            root_path=root_path,
             scan_mode=request.scan_mode,
             folder_path=request.folder_path,
             entry_point=request.entry_point,
@@ -53,7 +74,7 @@ async def scan_project_endpoint(request: ScanRequest):
             modules=result["modules"],
         )
     except FileNotFoundError:
-        raise HTTPException(status_code=400, detail=f"root_path does not exist: {request.root_path}")
+        raise HTTPException(status_code=400, detail=f"root_path does not exist: {root_path}")
     except Exception:
         logger.exception("Scan failed for project %s", request.project_id)
         raise HTTPException(status_code=500, detail="Scan failed — see server logs")

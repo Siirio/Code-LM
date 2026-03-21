@@ -24,7 +24,7 @@
     "publish": {
       "provider": "github",
       "owner": "Siirio",
-      "repo": "EngramAI"
+      "repo": "Code-LM"
     },
     "files": [
       "main.js",
