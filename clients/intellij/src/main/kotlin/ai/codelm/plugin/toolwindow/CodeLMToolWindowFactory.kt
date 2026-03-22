@@ -1,7 +1,7 @@
-package ai.engram.plugin.toolwindow
+package ai.codelm.plugin.toolwindow
 
-import ai.engram.plugin.actions.showScanModeDialog
-import ai.engram.plugin.client.*
+import ai.codelm.plugin.actions.showScanModeDialog
+import ai.codelm.plugin.client.*
 import java.io.File
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.fileEditor.FileEditorManager
@@ -20,12 +20,12 @@ import javax.swing.*
 
 /**
  * Creates the CodeLM tool window in the IDE sidebar.
- * Delegates all content to [EngramChatPanel].
+ * Delegates all content to [CodeLMChatPanel].
  */
-class EngramToolWindowFactory : ToolWindowFactory {
+class CodeLMToolWindowFactory : ToolWindowFactory {
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
-        val panel = EngramChatPanel(project)
+        val panel = CodeLMChatPanel(project)
         val content = ContentFactory.getInstance().createContent(panel, "", false)
         toolWindow.contentManager.addContent(content)
     }
@@ -39,7 +39,7 @@ class EngramToolWindowFactory : ToolWindowFactory {
  *   Center   — scrollable chat area
  *   Bottom   — text input + Send button
  */
-class EngramChatPanel(private val project: Project) : JPanel(BorderLayout()) {
+class CodeLMChatPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     companion object {
         val HELP_TEXT = """

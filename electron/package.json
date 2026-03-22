@@ -19,7 +19,7 @@
     "electron-builder": "^24.13.3"
   },
   "build": {
-    "appId": "ai.engram.app",
+    "appId": "ai.codelm.app",
     "productName": "Code LM",
     "publish": {
       "provider": "github",

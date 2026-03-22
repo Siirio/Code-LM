@@ -1,1 +1,1 @@
-rootProject.name = "engramai-intellij"
+rootProject.name = "codelm-intellij"

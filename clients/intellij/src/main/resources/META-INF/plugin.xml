@@ -1,5 +1,5 @@
 <idea-plugin>
-    <id>ai.engram.plugin</id>
+    <id>ai.codelm.plugin</id>
     <name>CodeLM</name>
     <vendor email="support@codelm.ai" url="https://codelm.ai">CodeLM</vendor>
     <description>
@@ -13,21 +13,21 @@
         <toolWindow
             id="CodeLM"
             anchor="right"
-            factoryClass="ai.engram.plugin.toolwindow.EngramToolWindowFactory"
-            icon="/icons/engram.svg"
+            factoryClass="ai.codelm.plugin.toolwindow.CodeLMToolWindowFactory"
+            icon="/icons/codelm.svg"
         />
         <applicationService
-            serviceImplementation="ai.engram.plugin.client.BackendClient"
+            serviceImplementation="ai.codelm.plugin.client.BackendClient"
         />
         <projectService
-            serviceImplementation="ai.engram.plugin.client.ProjectSession"
+            serviceImplementation="ai.codelm.plugin.client.ProjectSession"
         />
     </extensions>
 
     <actions>
         <action
             id="CodeLM.ScanProject"
-            class="ai.engram.plugin.actions.ScanProjectAction"
+            class="ai.codelm.plugin.actions.ScanProjectAction"
             text="Scan Project with CodeLM"
             description="Index current project into CodeLM knowledge base"
         >

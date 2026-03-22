@@ -4,7 +4,7 @@ plugins {
     id("org.jetbrains.intellij.platform") version "2.3.0"
 }
 
-group = "ai.engram"
+group = "ai.codelm"
 version = "0.1.0"
 
 repositories {

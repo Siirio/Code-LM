@@ -1,4 +1,4 @@
-package ai.engram.plugin.client
+package ai.codelm.plugin.client
 
 import com.google.gson.Gson
 import com.intellij.openapi.components.Service

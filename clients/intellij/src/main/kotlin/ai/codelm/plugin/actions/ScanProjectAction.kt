@@ -1,7 +1,7 @@
-package ai.engram.plugin.actions
+package ai.codelm.plugin.actions
 
-import ai.engram.plugin.client.BackendClient
-import ai.engram.plugin.client.ProjectSession
+import ai.codelm.plugin.client.BackendClient
+import ai.codelm.plugin.client.ProjectSession
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.application.ApplicationManager
