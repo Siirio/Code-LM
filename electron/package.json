@@ -35,7 +35,7 @@
     ],
     "extraResources": [
       {
-        "from": "../backend/dist/engramai-backend",
+        "from": "../backend/dist/codelm-backend",
         "to": "backend-bin",
         "filter": ["**/*"]
       },
