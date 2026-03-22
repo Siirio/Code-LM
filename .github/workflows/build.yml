@@ -72,7 +72,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: backend-bin-${{ matrix.os }}
-          path: backend/dist/engramai-backend/
+          path: backend/dist/codelm-backend/
           retention-days: 1
 
   build-electron:
@@ -106,7 +106,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: backend-bin-${{ matrix.os }}
-          path: backend/dist/engramai-backend/
+          path: backend/dist/codelm-backend/
 
       - name: Install Electron dependencies
         working-directory: electron
@@ -121,7 +121,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: engramai-${{ matrix.os }}
+          name: codelm-${{ matrix.os }}
           if-no-files-found: ignore
           retention-days: 1
           path: |
@@ -141,19 +141,19 @@ jobs:
       - name: Download electron artifacts (Windows)
         uses: actions/download-artifact@v4
         with:
-          name: engramai-windows-latest
+          name: codelm-windows-latest
           path: dist/
 
       - name: Download electron artifacts (macOS)
         uses: actions/download-artifact@v4
         with:
-          name: engramai-macos-latest
+          name: codelm-macos-latest
           path: dist/
 
       - name: Download electron artifacts (Linux)
         uses: actions/download-artifact@v4
         with:
-          name: engramai-ubuntu-latest
+          name: codelm-ubuntu-latest
           path: dist/
 
       - name: Create Release
