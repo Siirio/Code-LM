@@ -189,8 +189,8 @@ export default function TerminalPanel({ onClose, style }: Props) {
             <div className="terminal-unavail-icon">⌨</div>
             <div className="terminal-unavail-title">Terminal not available</div>
             <div className="terminal-unavail-msg">
-              The backend is running on Windows where PTY sessions are not supported.
-              Run the backend inside WSL to enable the terminal.
+              Could not connect to the terminal backend. Make sure the backend is running
+              and try reopening the terminal.
             </div>
           </div>
         )}

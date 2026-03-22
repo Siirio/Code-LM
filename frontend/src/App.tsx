@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
 import {
   canSendMessage,
   chatStream,
@@ -1051,12 +1052,12 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
             <button className={`panel-tab ${leftTab === 'chats' ? 'active' : ''}`} onClick={() => setLeftTab('chats')}>Chats</button>
           </div>
 
-          {leftTab === 'files' && (
-            <div key={treeKey} style={{ zoom: leftZoom, flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-              <FileTreePanel rootPath={rootPath} onFileOpen={handleFileOpen} onRefresh={refreshTree} pushUndo={pushUndoOp} />
-            </div>
-          )}
+          {/* Files tab — always mounted to preserve expansion state */}
+          <div key={treeKey} style={{ zoom: leftZoom, flex: 1, minHeight: 0, overflow: 'hidden', display: leftTab === 'files' ? 'flex' : 'none', flexDirection: 'column' }}>
+            <FileTreePanel rootPath={rootPath} onFileOpen={handleFileOpen} onRefresh={refreshTree} pushUndo={pushUndoOp} />
+          </div>
 
+          {/* Chats tab */}
           {leftTab === 'chats' && (
             <>
               <div className="sessions-label">Chats</div>
@@ -1422,7 +1423,10 @@ function MessageBubble({ message }: { message: DisplayMessage }) {
         </div>
       )}
       {message.role === 'user' && <div className="message-header"><span className="sender">You</span></div>}
-      <pre className="message-content">{message.content}</pre>
+      {message.role === 'assistant'
+        ? <div className="message-content markdown"><ReactMarkdown>{message.content}</ReactMarkdown></div>
+        : <pre className="message-content">{message.content}</pre>
+      }
     </div>
   )
 }

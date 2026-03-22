@@ -60,6 +60,8 @@ a = Analysis(
         'dotenv',
         'aiofiles',
         'httpx',
+        # Windows PTY support
+        'winpty',
     ],
     hookspath=[],
     hooksconfig={},

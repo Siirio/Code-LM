@@ -191,14 +191,15 @@ TOOLS = [
     },
     {
         "name": "propose_file_edit",
-        "description": "Propose a code change to a specific file. Use when asked to implement, fix, or modify code. The user will review and accept or reject the change in the IDE.",
+        "description": "Propose a code change to a specific file. Architecture is validated automatically before every call — you will receive objections if rules are violated. If you receive an architect_review response, revise your proposal or ask the user if the violation is critical.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "file_path": {"type": "string", "description": "Absolute path to the file to edit"},
                 "description": {"type": "string", "description": "What is being changed and why"},
                 "original_snippet": {"type": "string", "description": "The exact original code to replace (empty string for new insertions)"},
-                "new_snippet": {"type": "string", "description": "The replacement code"}
+                "new_snippet": {"type": "string", "description": "The replacement code"},
+                "arch_validated": {"type": "boolean", "description": "Set to true after reviewing architect_review feedback and confirming no violations (or after user approved a critical one)"}
             },
             "required": ["file_path", "description", "new_snippet"]
         }
@@ -492,11 +493,54 @@ async def _execute_tool(tool_name: str, tool_input: dict, project_id: str) -> st
             return json.dumps({"status": "error", "message": str(exc)})
 
     elif tool_name == "propose_file_edit":
-        # Return the proposal data — the streaming layer emits this as a file_edit SSE event
+        # ── Internal Architect validation ─────────────────────────────────────
+        # Before accepting any edit proposal, silently validate against architecture
+        # rules. Skipped if Coder already confirmed validation (arch_validated=True).
+        already_validated = tool_input.get("arch_validated", False)
+        description = tool_input.get("description", "")
+
+        if not already_validated and description:
+            arch_result_str = await _execute_tool(
+                "check_architecture_rules",
+                {"project_id": project_id, "description": description},
+                project_id,
+            )
+            try:
+                arch_result = json.loads(arch_result_str)
+                rules = arch_result.get("rules", [])
+                if rules:
+                    # Determine if any rule mentions critical layer boundaries
+                    desc_lower = description.lower()
+                    is_critical = any(
+                        kw in desc_lower
+                        for kw in ["controller", "repository", "direct call", "bypass", "cross-module"]
+                    )
+                    return json.dumps({
+                        "status": "architect_review",
+                        "architecture_rules": rules,
+                        "critical": is_critical,
+                        "proposal": {
+                            "file_path": tool_input.get("file_path", ""),
+                            "description": description,
+                            "original_snippet": tool_input.get("original_snippet", ""),
+                            "new_snippet": tool_input.get("new_snippet", ""),
+                        },
+                        "instruction": (
+                            "CRITICAL layer violation risk detected. You MUST ask the user before proceeding. "
+                            "Explain the violation and ask for explicit approval."
+                            if is_critical else
+                            "Review the architecture_rules above against your proposed change. "
+                            "If no violations: call propose_file_edit again with arch_validated=true. "
+                            "If violations exist: revise your proposal first, then call propose_file_edit again."
+                        ),
+                    })
+            except Exception:
+                pass  # arch check failed — proceed with proposal
+
         return json.dumps({
             "status": "proposal_ready",
             "file_path": tool_input.get("file_path", ""),
-            "description": tool_input.get("description", ""),
+            "description": description or tool_input.get("description", ""),
             "original_snippet": tool_input.get("original_snippet", ""),
             "new_snippet": tool_input.get("new_snippet", ""),
         })
@@ -511,60 +555,35 @@ You are acting as the Debugger Agent for this request.
 Focus exclusively on: identifying root causes, tracing error paths, explaining why something breaks.
 Read the relevant files first with read_file before diagnosing.
 Be precise — cite file paths and line content. Do not speculate.
+You always have full project context pre-loaded. Never ask the user to describe the project,
+re-explain what modules exist, or repeat information already in the project memory.
+Use the pre-loaded memory and read files directly — the context is already here.
 """
 
-_CODEGEN_PROMPT = """
-You are acting as the Code Generation Agent for this request.
-Focus exclusively on: writing clean, correct, DRY code that fits the existing architecture.
-Always: (1) read the relevant files first, (2) check the code graph for existing components, (3) propose changes with propose_file_edit — never paste raw code blocks as final output.
+_CODER_PROMPT = """
+You are acting as the Coder Agent for this request.
+You handle ALL coding tasks: implementing features, fixing bugs, explaining code, and refactoring.
+For implementation: (1) read the relevant files first, (2) check the code graph for existing components, (3) propose changes with propose_file_edit — never paste raw code blocks as final output.
+For explanation: read the relevant file(s), then explain clearly citing actual file paths and function names.
 Follow the project's existing naming conventions and layer rules.
-"""
-
-_ARCHITECT_PROMPT = """
-You are acting as the Architecture Agent for this request.
-Focus exclusively on: design decisions, layer violations, DRY enforcement, dependency analysis, and architectural impact.
-Use query_code_graph and get_project_memory extensively before answering.
-Think in terms of modules, layers, and long-term maintainability.
-"""
-
-_EXPLAIN_PROMPT = """
-You are acting as the Explanation Agent for this request.
-Focus exclusively on: explaining what existing code does, how it works, and why it is structured that way.
-Read the relevant file(s) first, then explain clearly and concisely.
-Do NOT suggest changes, refactors, or improvements unless explicitly asked.
-Cite file paths and function names from the retrieved content only.
+Architecture validation runs automatically before every propose_file_edit — you will receive objections if violations are found. Revise accordingly.
 """
 
 _INTENT_KEYWORDS: list[tuple[str, list[str]]] = [
-    ("debugger",  ["bug", "error", "fix", "broken", "crash", "fail", "exception", "traceback", "issue", "not working", "wrong", "incorrect"]),
-    ("codegen",   ["implement", "add", "create", "write", "generate", "build", "make", "new method", "new class", "new endpoint", "scaffold"]),
-    ("architect", ["architecture", "design", "structure", "pattern", "refactor", "dependency", "layer", "module", "coupling", "solid", "ddd"]),
-    ("explain",   ["explain", "what is", "what does", "how does", "describe", "show me", "tell me", "walk me through", "what are", "how is"]),
+    ("debugger", ["bug", "error", "fix", "broken", "crash", "fail", "exception", "traceback", "issue", "not working", "wrong", "incorrect"]),
+    ("coder",    ["implement", "add", "create", "write", "generate", "build", "make", "new method", "new class", "new endpoint", "scaffold",
+                  "explain", "what is", "what does", "how does", "describe", "show me", "walk me through", "refactor"]),
 ]
 
-# When keyword scores tie, higher priority wins.
-# codegen > debugger > architect > explain
-# Rationale: action verbs (implement, fix) signal stronger intent than
-# question words (explain, what is) which often appear in action queries too.
+# coder wins over debugger on ties — explicit creation intent beats ambiguous bug terms
 _AGENT_PRIORITY: dict[str, int] = {
-    "codegen": 4,
-    "debugger": 3,
-    "architect": 2,
-    "explain": 1,
+    "coder": 2,
+    "debugger": 1,
 }
 
 
 def _detect_agent(message: str) -> str:
-    """Return the best-matching sub-agent based on keyword score + priority tiebreak.
-
-    Scoring: count keyword hits per agent.
-    Tiebreak: codegen > debugger > architect > explain.
-
-    Examples:
-      "explain how to implement auth"  → codegen=1  explain=1  → codegen (priority)
-      "fix the design of the module"   → debugger=1 architect=1 → debugger (priority)
-      "what does the auth bug look like" → explain=1 debugger=2 → debugger (score)
-    """
+    """Return coder, debugger, or main based on keyword scoring + priority tiebreak."""
     lower = message.lower()
     scores: dict[str, int] = {
         agent: sum(1 for kw in keywords if kw in lower)
@@ -579,12 +598,8 @@ def _detect_agent(message: str) -> str:
 def _agent_prompt_extension(agent: str) -> str:
     if agent == "debugger":
         return _DEBUGGER_PROMPT
-    if agent == "codegen":
-        return _CODEGEN_PROMPT
-    if agent == "architect":
-        return _ARCHITECT_PROMPT
-    if agent == "explain":
-        return _EXPLAIN_PROMPT
+    if agent == "coder":
+        return _CODER_PROMPT
     return ""
 
 
@@ -861,6 +876,30 @@ async def chat_stream(
 
     # Build system param: static SYSTEM_PROMPT cached, dynamic context uncached
     system_param = _system_param(provider_name, SYSTEM_PROMPT, dynamic_context)
+
+    # ── Mandatory project memory pre-load ────────────────────────────────────
+    # Always inject get_project_memory as the first synthetic tool exchange so
+    # the LLM has full project context before generating any response.
+    # This is unconditional — no skill or agent can skip it.
+    _pre_id = "pre_memory_0"
+    pre_memory_result = await _execute_tool(
+        "get_project_memory", {"project_id": project_id}, project_id
+    )
+    pre_memory_content = (
+        [{"type": "text", "text": pre_memory_result, "cache_control": {"type": "ephemeral"}}]
+        if provider_name.lower() == "anthropic"
+        else pre_memory_result
+    )
+    messages.append({
+        "role": "assistant",
+        "content": [{"type": "tool_use", "id": _pre_id, "name": "get_project_memory",
+                     "input": {"project_id": project_id}}],
+    })
+    messages.append({
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": _pre_id,
+                     "content": pre_memory_content}],
+    })
 
     while True:
         # Reduce max_tokens when balance is exhausted to encourage a quick finish
