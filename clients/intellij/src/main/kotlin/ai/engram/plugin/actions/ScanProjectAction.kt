@@ -21,7 +21,7 @@ class ScanProjectAction : AnAction() {
 
         val params = showScanModeDialog(session.rootPath) ?: return  // user cancelled
 
-        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "EngramAI: Scanning project...") {
+        ProgressManager.getInstance().run(object : Task.Backgroundable(project, "CodeLM: Scanning project...") {
             override fun run(indicator: ProgressIndicator) {
                 indicator.isIndeterminate = true
                 try {
@@ -35,14 +35,14 @@ class ScanProjectAction : AnAction() {
                     ApplicationManager.getApplication().invokeLater {
                         Messages.showInfoMessage(
                             "Scan complete — ${result.files_found} files, ${result.classes_found} classes, ${result.functions_found} functions indexed.\n\n${result.message}",
-                            "EngramAI Scan"
+                            "CodeLM Scan"
                         )
                     }
                 } catch (ex: Exception) {
                     ApplicationManager.getApplication().invokeLater {
                         Messages.showErrorDialog(
-                            "Could not reach EngramAI backend: ${ex.message}\n\nMake sure it's running: cd backend && python main.py",
-                            "EngramAI Error"
+                            "Could not reach CodeLM backend: ${ex.message}\n\nMake sure it's running: cd backend && python main.py",
+                            "CodeLM Error"
                         )
                     }
                 }
@@ -66,7 +66,7 @@ fun showScanModeDialog(rootPath: String): ScanParams? {
     val choice = JOptionPane.showOptionDialog(
         null,
         "Choose scan mode:\n\nFull scan indexes the entire project.\nFolder scan indexes only a selected subfolder.\nSmart scan follows dependency graph from a class or file.",
-        "EngramAI — Choose Scan Mode",
+        "CodeLM — Choose Scan Mode",
         JOptionPane.DEFAULT_OPTION,
         JOptionPane.QUESTION_MESSAGE,
         null,
@@ -78,7 +78,7 @@ fun showScanModeDialog(rootPath: String): ScanParams? {
         1 -> {
             val folder = Messages.showInputDialog(
                 "Which folder should I scan?\n(Relative to project root or absolute path)",
-                "EngramAI — Folder Scan",
+                "CodeLM — Folder Scan",
                 null,
                 rootPath,
                 null,
@@ -88,7 +88,7 @@ fun showScanModeDialog(rootPath: String): ScanParams? {
         2 -> {
             val entryPoint = Messages.showInputDialog(
                 "Which class, file, or feature should I analyze?\n(e.g. UserController, AuthService, PaymentRepository)",
-                "EngramAI — Smart Scan",
+                "CodeLM — Smart Scan",
                 null,
                 "",
                 null,

@@ -9,7 +9,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
 
 /**
- * HTTP client that talks to the EngramAI Python backend.
+ * HTTP client that talks to the CodeLM Python backend.
  * All IDE clients (IntelliJ, VSCode, etc.) speak this same API.
  */
 @Service(Service.Level.APP)

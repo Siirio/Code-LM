@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>ai.engram.plugin</id>
-    <name>EngramAI</name>
-    <vendor email="support@engramai.dev" url="https://engramai.dev">EngramAI</vendor>
+    <name>CodeLM</name>
+    <vendor email="support@codelm.ai" url="https://codelm.ai">CodeLM</vendor>
     <description>
         AI Software Architect — persistent project memory, code graph analysis,
         architecture enforcement, and intelligent code generation.
@@ -11,7 +11,7 @@
 
     <extensions defaultExtensionNs="com.intellij">
         <toolWindow
-            id="EngramAI"
+            id="CodeLM"
             anchor="right"
             factoryClass="ai.engram.plugin.toolwindow.EngramToolWindowFactory"
             icon="/icons/engram.svg"
@@ -26,10 +26,10 @@
 
     <actions>
         <action
-            id="EngramAI.ScanProject"
+            id="CodeLM.ScanProject"
             class="ai.engram.plugin.actions.ScanProjectAction"
-            text="Scan Project with EngramAI"
-            description="Index current project into EngramAI knowledge base"
+            text="Scan Project with CodeLM"
+            description="Index current project into CodeLM knowledge base"
         >
             <add-to-group group-id="ToolsMenu" anchor="last"/>
         </action>

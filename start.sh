@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start EngramAI in browser mode (no Electron needed)
+# Start CodeLM in browser mode (no Electron needed)
 # Usage: ./start.sh /path/to/your/project
 
 set -e
@@ -7,7 +7,7 @@ set -e
 ROOT="${1:-$(pwd)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-echo "EngramAI — starting..."
+echo "CodeLM — starting..."
 echo "Project root: $ROOT"
 
 cd "$SCRIPT_DIR/backend"

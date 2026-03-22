@@ -19,7 +19,7 @@ import java.awt.event.KeyListener
 import javax.swing.*
 
 /**
- * Creates the EngramAI tool window in the IDE sidebar.
+ * Creates the CodeLM tool window in the IDE sidebar.
  * Delegates all content to [EngramChatPanel].
  */
 class EngramToolWindowFactory : ToolWindowFactory {
@@ -43,7 +43,7 @@ class EngramChatPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     companion object {
         val HELP_TEXT = """
-EngramAI — AI Software Architect in your IDE.
+CodeLM — AI Software Architect in your IDE.
 
 Scan modes (type in chat or use Tools → Scan Project):
   /full-scan         — index the entire project
@@ -337,7 +337,7 @@ Type a message below and press Enter.
                         appendToChat(HELP_TEXT + "\n")
                     } else {
                         messages.forEach { msg ->
-                            val prefix = if (msg.role == "user") "You" else "EngramAI"
+                            val prefix = if (msg.role == "user") "You" else "CodeLM"
                             appendToChat("$prefix: ${msg.content}\n\n")
                         }
                     }
@@ -372,7 +372,7 @@ Type a message below and press Enter.
 
     private fun deleteCurrentChat() {
         val sessionId = currentSessionId ?: run {
-            Messages.showInfoMessage("No active chat to delete.", "EngramAI")
+            Messages.showInfoMessage("No active chat to delete.", "CodeLM")
             return
         }
         val confirm = Messages.showYesNoDialog(
@@ -480,11 +480,11 @@ Type a message below and press Enter.
         // Show initial thinking status with spinner
         var statusLineStart = responseStart
         var currentToolLabel: String? = null
-        chatArea.append("${spinnerFrames[0]} EngramAI is thinking...\n")
+        chatArea.append("${spinnerFrames[0]} CodeLM is thinking...\n")
         val statusTimer = Timer(80) {
             spinnerIndex = (spinnerIndex + 1) % spinnerFrames.size
             SwingUtilities.invokeLater {
-                val label = currentToolLabel ?: "EngramAI is thinking..."
+                val label = currentToolLabel ?: "CodeLM is thinking..."
                 val doc = chatArea.document
                 val len = doc.length - statusLineStart
                 if (len > 0) doc.remove(statusLineStart, len)
@@ -514,7 +514,7 @@ Type a message below and press Enter.
                                 val doc = chatArea.document
                                 val len = doc.length - statusLineStart
                                 if (len > 0) doc.remove(statusLineStart, len)
-                                doc.insertString(statusLineStart, "EngramAI: $chunk", null)
+                                doc.insertString(statusLineStart, "CodeLM: $chunk", null)
                             } else {
                                 chatArea.append(chunk)
                             }
@@ -549,7 +549,7 @@ Type a message below and press Enter.
                         val doc = chatArea.document
                         val len = doc.length - statusLineStart
                         if (len > 0) doc.remove(statusLineStart, len)
-                        doc.insertString(statusLineStart, "EngramAI: (No text in response)\n\n", null)
+                        doc.insertString(statusLineStart, "CodeLM: (No text in response)\n\n", null)
                     } else {
                         chatArea.append("\n\n")
                     }
@@ -668,7 +668,7 @@ Type a message below and press Enter.
             val choice = JOptionPane.showOptionDialog(
                 this,
                 preview,
-                "EngramAI — Proposed Edit",
+                "CodeLM — Proposed Edit",
                 JOptionPane.DEFAULT_OPTION,
                 JOptionPane.PLAIN_MESSAGE,
                 null,
