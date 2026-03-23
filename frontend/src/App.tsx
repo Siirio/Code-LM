@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   canSendMessage,
   chatStream,
   clearAuth,
   createSession,
   CREDIT_PLANS,
+  deleteProjectKnowledge,
   deleteSession,
   fetchFileContent,
   fetchFileTree,
@@ -53,10 +55,29 @@ function getProjectConfig(): { projectId: string; rootPath: string } {
 
 interface DisplayMessage {
   id: string
-  role: 'user' | 'assistant' | 'system'
+  role: 'user' | 'assistant' | 'system' | 'file-edit'
   content: string
   agentLabel?: string
   streaming?: boolean
+  fileEdit?: FileEditProposal
+}
+
+interface FileChange {
+  id: string
+  session_id: string
+  file_path: string
+  action: 'create' | 'update' | 'delete'
+  summary: string
+  completed: boolean
+  created_at: string
+}
+
+interface TodoItem {
+  id: string
+  session_id: string
+  text: string
+  completed: boolean
+  created_at: string
 }
 
 interface CodeLMSettings {
@@ -65,6 +86,15 @@ interface CodeLMSettings {
 }
 
 const SCALE_ZOOM = [0, 0.65, 0.75, 0.85, 1.0, 1.15, 1.35] // index 0 unused
+
+// ── Scan shelf item ───────────────────────────────────────────────────────────
+
+interface ScanItem {
+  id: string
+  type: 'file' | 'package'
+  name: string
+  path: string
+}
 
 const DEFAULT_SETTINGS: CodeLMSettings = {
   fontSize: 14,
@@ -79,10 +109,16 @@ function loadSettings(): CodeLMSettings {
   return { ...DEFAULT_SETTINGS }
 }
 
-// Apply zoom immediately at module load to avoid layout flash
-;(function applyInitialZoom() {
+// Apply scale immediately at module load to avoid layout flash.
+// We target #app-root so xterm canvas is not affected by CSS zoom.
+;(function applyInitialScale() {
   const s = loadSettings()
-  document.documentElement.style.zoom = String(SCALE_ZOOM[s.uiScale] ?? 1.0)
+  const scale = SCALE_ZOOM[s.uiScale] ?? 1.0
+  if (scale !== 1.0) {
+    // #app-root may not exist yet — set a class on <html> as a fallback signal
+    // and let the useEffect in IDE finish the job once React mounts.
+    document.documentElement.dataset.pendingScale = String(scale)
+  }
 })()
 
 function saveSettings(s: CodeLMSettings) {
@@ -186,9 +222,14 @@ interface FileTreePanelProps {
   onFileOpen?: (path: string) => void
   onRefresh?: () => void
   pushUndo?: (op: UndoOp) => void
+  refreshSignal?: number
+  onScanRequest?: (cmd: string) => void
+  /** CSS scale factor applied to #app-root — needed to correct fixed-position
+   *  context menu coords when transform:scale() is active. */
+  menuScale?: number
 }
 
-function FileTreePanel({ rootPath, onFileOpen, onRefresh, pushUndo }: FileTreePanelProps) {
+function FileTreePanel({ rootPath, onFileOpen, onRefresh, pushUndo, refreshSignal, onScanRequest, menuScale = 1.0 }: FileTreePanelProps) {
   const [tree, setTree] = useState<TreeNode | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [error, setError] = useState('')
@@ -201,11 +242,26 @@ function FileTreePanel({ rootPath, onFileOpen, onRefresh, pushUndo }: FileTreePa
   const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const selectedPathsRef = useRef<Set<string>>(new Set())
 
+  // When #app-root has transform:scale(), position:fixed children are positioned
+  // relative to that container, not the viewport. Divide clientX/Y by the scale
+  // so the menu appears under the pointer.
+  function menuCoords(clientX: number, clientY: number) {
+    return { x: clientX / menuScale, y: clientY / menuScale }
+  }
+
   useEffect(() => {
     fetchFileTree(rootPath)
       .then(t => { setTree(t); setExpanded(new Set([rootPath])) })
       .catch(() => setError('Could not load files'))
   }, [rootPath])
+
+  // Refresh tree data without resetting expanded state
+  useEffect(() => {
+    if (!refreshSignal) return
+    fetchFileTree(rootPath)
+      .then(t => setTree(t))
+      .catch(() => {/* ignore refresh errors */})
+  }, [refreshSignal])
 
   // Drag selection handlers
   useEffect(() => {
@@ -237,7 +293,8 @@ function FileTreePanel({ rootPath, onFileOpen, onRefresh, pushUndo }: FileTreePa
       const hadSelection = selectedPathsRef.current.size > 1
       setDragSel(null)
       if (hadSelection) {
-        setBulkMenu({ x: e.clientX, y: e.clientY })
+        const c = menuCoords(e.clientX, e.clientY)
+        setBulkMenu({ x: c.x, y: c.y })
       }
     }
 
@@ -373,7 +430,8 @@ function FileTreePanel({ rootPath, onFileOpen, onRefresh, pushUndo }: FileTreePa
             onContextMenu={e => {
               e.preventDefault()
               e.stopPropagation()
-              setCtxMenu({ x: e.clientX, y: e.clientY, node })
+              const c = menuCoords(e.clientX, e.clientY)
+              setCtxMenu({ x: c.x, y: c.y, node })
             }}
           >
             <span className="tree-arrow">{isOpen ? '\u25BE' : '\u25B8'}</span>
@@ -484,6 +542,19 @@ function FileTreePanel({ rootPath, onFileOpen, onRefresh, pushUndo }: FileTreePa
               setCtxMenu(null)
             }}>New Folder</div>
             <div className="ctx-separator" />
+            {ctxMenu.node.type === 'dir' && (
+              <div className="ctx-item" onClick={() => {
+                onScanRequest?.(`/package-scan ${ctxMenu.node.path}`)
+                setCtxMenu(null)
+              }}>Package scan</div>
+            )}
+            {ctxMenu.node.type === 'file' && (
+              <div className="ctx-item" onClick={() => {
+                onScanRequest?.(`/auto-scan ${ctxMenu.node.path}`)
+                setCtxMenu(null)
+              }}>Auto scan</div>
+            )}
+            <div className="ctx-separator" />
             <div className="ctx-item ctx-item-danger" onClick={() => {
               handleDelete(ctxMenu.node)
               setCtxMenu(null)
@@ -517,6 +588,67 @@ function FileTreePanel({ rootPath, onFileOpen, onRefresh, pushUndo }: FileTreePa
   )
 }
 
+// ── ScanShelf ─────────────────────────────────────────────────────────────────
+
+function ScanShelf({
+  items,
+  activeIds,
+  onToggle,
+  onRemove,
+}: {
+  items: ScanItem[]
+  activeIds: Set<string>
+  onToggle: (id: string) => void
+  onRemove: (id: string) => void
+}) {
+  const shelfRef = useRef<HTMLDivElement>(null)
+
+  // Arrow key navigation across chips
+  function handleKeyDown(e: React.KeyboardEvent<HTMLDivElement>, id: string) {
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault()
+      onToggle(id)
+      return
+    }
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault()
+      const chips = Array.from(shelfRef.current?.querySelectorAll<HTMLElement>('.scan-chip') ?? [])
+      const idx = chips.findIndex(el => el === e.currentTarget)
+      const next = chips[idx + (e.key === 'ArrowRight' ? 1 : -1)]
+      next?.focus()
+    }
+  }
+
+  return (
+    <div className="scan-shelf">
+      <span className="scan-shelf-label">CONTEXT</span>
+      <div className="scan-shelf-items" ref={shelfRef}>
+        {items.map(item => (
+          <div
+            key={item.id}
+            className={`scan-chip${activeIds.has(item.id) ? ' scan-chip-active' : ''}`}
+            onClick={() => onToggle(item.id)}
+            onKeyDown={e => handleKeyDown(e, item.id)}
+            title={item.path}
+            tabIndex={0}
+            role="button"
+            aria-pressed={activeIds.has(item.id)}
+          >
+            <span className="scan-chip-icon">{item.type === 'file' ? '\uD83D\uDCC4' : '\uD83D\uDCC1'}</span>
+            <span className="scan-chip-name">{item.name}</span>
+            <span
+              className="scan-chip-remove"
+              role="button"
+              tabIndex={-1}
+              onClick={e => { e.stopPropagation(); onRemove(item.id) }}
+            >&#215;</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 // ── IDE ───────────────────────────────────────────────────────────────────────
 
 function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
@@ -529,14 +661,21 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   const [backendOk, setBackendOk] = useState(false)
   const [acceptAll, setAcceptAll] = useState(false)
   const [pendingEdit, setPendingEdit] = useState<FileEditProposal | null>(null)
+  const [applyBusy, setApplyBusy] = useState(false)
   const [scanBusy, setScanBusy] = useState(false)
+  const [showChanges, setShowChanges] = useState(false)
+  const [fileChanges, setFileChanges] = useState<FileChange[]>([])
+  const [todos, setTodos] = useState<TodoItem[]>([])
+  const [changesBadge, setChangesBadge] = useState(0)
 
   // Settings
   const [settings, setSettings] = useState<CodeLMSettings>(loadSettings)
   const [showSettings, setShowSettings] = useState(false)
-  const [settingsTab, setSettingsTab] = useState<'general' | 'account'>('general')
+  const [settingsTab, setSettingsTab] = useState<'general' | 'project' | 'account'>('general')
   const [settingsApiKey, setSettingsApiKey] = useState('')
   const [settingsAccountTab, setSettingsAccountTab] = useState<'key' | 'credits'>('credits')
+  const [clearKnowledgeConfirm, setClearKnowledgeConfirm] = useState(false)
+  const [clearKnowledgeLoading, setClearKnowledgeLoading] = useState(false)
 
   // Help modal
   const [showHelp, setShowHelp] = useState(false)
@@ -559,6 +698,10 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
 
   // Tree refresh key
   const [treeKey, setTreeKey] = useState(0)
+
+  // Scan shelf
+  const [scanShelf, setScanShelf] = useState<ScanItem[]>([])
+  const [activeScanIds, setActiveScanIds] = useState<Set<string>>(new Set())
 
   // Undo/Redo stacks
   const undoStack = useRef<UndoOp[]>([])
@@ -600,9 +743,25 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   const streamCancelRef = useRef<(() => void) | null>(null)
 
   // Apply settings to CSS
+  // We use transform:scale on the #app-root div instead of document.documentElement.style.zoom
+  // because CSS zoom on <html> breaks xterm.js canvas hit-testing and blurs the canvas buffer.
   useEffect(() => {
     document.documentElement.style.setProperty('--font-size', `${settings.fontSize}px`)
-    document.documentElement.style.zoom = String(SCALE_ZOOM[settings.uiScale] ?? 1.0)
+    const scale = SCALE_ZOOM[settings.uiScale] ?? 1.0
+    const root = document.getElementById('app-root')
+    if (root) {
+      if (scale === 1.0) {
+        root.style.transform = ''
+        root.style.transformOrigin = ''
+        root.style.width = ''
+        root.style.height = ''
+      } else {
+        root.style.transform = `scale(${scale})`
+        root.style.transformOrigin = 'top left'
+        root.style.width = `${100 / scale}%`
+        root.style.height = `${100 / scale}%`
+      }
+    }
     saveSettings(settings)
   }, [settings])
 
@@ -767,6 +926,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   async function switchSession(sessionId: string) {
     setCurrentSessionId(sessionId)
     setAcceptAll(false)
+    setShowChanges(false)
     try {
       const msgs = await getMessages(sessionId)
       if (msgs.length === 0) {
@@ -777,6 +937,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
     } catch {
       setMessages([])
     }
+    refreshChanges(sessionId)
   }
 
   function askDeleteSession(sessionId: string) {
@@ -805,7 +966,8 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
         project_id: projectId,
         root_path: rootPath,
         scan_mode: mode,
-        entry_point: hint,
+        folder_path: mode === 'folder' ? hint : undefined,
+        entry_point: mode === 'smart' ? hint : undefined,
       })
       addSystem(`Scan complete — ${result.files_found} files, ${result.classes_found} classes indexed`)
     } catch (e: unknown) {
@@ -906,6 +1068,16 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
     setInput('')
     setSlashSuggestions([])
 
+    // Prepend active scan shelf items as context hints for the AI
+    if (activeScanIds.size > 0) {
+      const ctxPaths = scanShelf
+        .filter(s => activeScanIds.has(s.id))
+        .map(s => `${s.type === 'file' ? 'file' : 'package'}:${s.path}`)
+      if (ctxPaths.length > 0) {
+        msg = `[Scan context: ${ctxPaths.join(', ')}]\n${msg}`
+      }
+    }
+
     // Slash command handling
     if (msg.startsWith('/full-scan')) {
       addSystem('Starting full scan...')
@@ -945,7 +1117,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
     addMessage('user', msg)
     setBusy(true)
 
-    const assistantId = Date.now().toString()
+    const assistantId = crypto.randomUUID()
     setMessages(prev => [
       ...prev,
       { id: assistantId, role: 'assistant', content: '', streaming: true },
@@ -976,11 +1148,19 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
         },
         onFileEdit: proposal => {
           if (acceptAll) {
-            applyEdit(proposal)
+            applyEdit(proposal).catch(() => {})
             addSystem(`Applied: ${proposal.file_path}`)
           } else {
-            setPendingEdit(proposal)
+            setMessages(prev => [...prev, {
+              id: crypto.randomUUID(),
+              role: 'file-edit' as const,
+              content: '',
+              fileEdit: proposal,
+            }])
           }
+        },
+        onTodosAdded: () => {
+          refreshChanges(sessionId)
         },
         onDone: () => {
           setMessages(prev =>
@@ -989,6 +1169,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
           setBusy(false)
           setStatusLine('')
           listSessions(projectId).then(setSessions).catch(() => {})
+          refreshChanges(sessionId)
           inputRef.current?.focus()
         },
         onError: err => {
@@ -1006,35 +1187,60 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
     )
   }
 
+  // ── Change tracking ───────────────────────────────────────────────────────
+
+  async function refreshChanges(sid: string | null) {
+    if (!sid) return
+    try {
+      const [changes, newTodos] = await Promise.all([
+        fetch(`/api/v1/sessions/${sid}/changes`).then(r => r.json()),
+        fetch(`/api/v1/sessions/${sid}/todos`).then(r => r.json()),
+      ])
+      setFileChanges(Array.isArray(changes) ? changes : [])
+      setTodos(Array.isArray(newTodos) ? newTodos : [])
+      const unresolved = (Array.isArray(newTodos) ? newTodos : []).filter((t: TodoItem) => !t.completed).length
+      setChangesBadge(unresolved)
+    } catch { /* ignore */ }
+  }
+
   // ── File edits ────────────────────────────────────────────────────────────
 
-  function applyEdit(proposal: FileEditProposal) {
-    fetch('/api/v1/files/apply-edit', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(proposal),
-    })
-      .then(r => {
-        if (!r.ok) throw new Error(r.statusText)
-        addSystem(`Written: ${proposal.file_path}`)
+  async function applyEdit(proposal: FileEditProposal) {
+    setApplyBusy(true)
+    try {
+      const r = await fetch('/api/v1/files/apply-edit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...proposal, session_id: currentSessionId }),
       })
-      .catch(e => addSystem(`Write failed: ${e.message}`))
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({ detail: r.statusText }))
+        throw new Error(body.detail || r.statusText)
+      }
+      addSystem(`Written: ${proposal.file_path}`)
+      refreshChanges(currentSessionId)
+    } catch (e: any) {
+      addSystem(`Write failed: ${e.message}`)
+      throw e
+    } finally {
+      setApplyBusy(false)
+    }
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
   function addMessage(role: 'user' | 'assistant', content: string) {
-    setMessages(prev => [...prev, { id: Date.now().toString(), role, content }])
+    setMessages(prev => [...prev, { id: crypto.randomUUID(), role, content }])
   }
 
   function addSystem(content: string) {
-    setMessages(prev => [...prev, { id: Date.now().toString(), role: 'system', content }])
+    setMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'system', content }])
   }
 
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="ide-outer">
+    <div id="app-root" className="ide-outer">
       <div className="ide-panels">
         {/* Left panel */}
         <aside
@@ -1053,8 +1259,31 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
           </div>
 
           {/* Files tab — always mounted to preserve expansion state */}
-          <div key={treeKey} style={{ zoom: leftZoom, flex: 1, minHeight: 0, overflow: 'hidden', display: leftTab === 'files' ? 'flex' : 'none', flexDirection: 'column' }}>
-            <FileTreePanel rootPath={rootPath} onFileOpen={handleFileOpen} onRefresh={refreshTree} pushUndo={pushUndoOp} />
+          <div style={{ fontSize: `${leftZoom * 100}%`, flex: 1, minHeight: 0, overflow: 'hidden', display: leftTab === 'files' ? 'flex' : 'none', flexDirection: 'column' }}>
+            <FileTreePanel
+              rootPath={rootPath}
+              onFileOpen={handleFileOpen}
+              onRefresh={refreshTree}
+              pushUndo={pushUndoOp}
+              refreshSignal={treeKey}
+              menuScale={SCALE_ZOOM[settings.uiScale] ?? 1.0}
+              onScanRequest={async (cmd) => {
+                setLeftTab('chats')
+                const isPackage = cmd.startsWith('/package-scan ')
+                const isAuto    = cmd.startsWith('/auto-scan ')
+                if (!isPackage && !isAuto) { setInput(cmd); setTimeout(() => inputRef.current?.focus(), 50); return }
+                const rawPath = cmd.replace(isPackage ? '/package-scan ' : '/auto-scan ', '').trim()
+                const name = rawPath.split(/[/\\]/).filter(Boolean).pop() || rawPath
+                const id = btoa(rawPath).replace(/[^a-zA-Z0-9]/g, '').slice(0, 20)
+                await runScan(isPackage ? 'folder' : 'smart', rawPath)
+                setScanShelf(prev => prev.some(s => s.path === rawPath) ? prev : [
+                  ...prev,
+                  { id, type: isPackage ? 'package' : 'file', name, path: rawPath },
+                ])
+                setActiveScanIds(prev => new Set([...prev, id]))
+                setTimeout(() => inputRef.current?.focus(), 50)
+              }}
+            />
           </div>
 
           {/* Chats tab */}
@@ -1133,6 +1362,13 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
                   <span className="credits-label">${(credits.balance_usd ?? 0).toFixed(2)}</span>
                 </div>
               )}
+              <button
+                className={`toolbar-btn changes-btn${showChanges ? ' toolbar-btn-active' : ''}`}
+                onClick={() => setShowChanges(v => !v)}
+                title="Session changes"
+              >
+                Changes{changesBadge > 0 && <span className="changes-badge">{changesBadge}</span>}
+              </button>
               <button className="toolbar-btn" onClick={() => setShowHelp(true)} title="Help">?</button>
               <button className="toolbar-btn" onClick={() => setShowSettings(true)} title="Settings">&#9881;</button>
               <button
@@ -1143,14 +1379,44 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
             </div>
           </div>
 
+          {showChanges && (
+            <ChangesPanel
+              fileChanges={fileChanges}
+              todos={todos}
+              onClose={() => setShowChanges(false)}
+            />
+          )}
+
           <div className="messages">
             {messages.map(m => (
-              <MessageBubble key={m.id} message={m} />
+              <MessageBubble
+                key={m.id}
+                message={m}
+                onApplyEdit={applyEdit}
+                onRejectEdit={p => addSystem(`Rejected: ${p.file_path}`)}
+              />
             ))}
             <div ref={messagesEndRef} />
           </div>
 
           {statusLine && <div className="status-line">{statusLine}</div>}
+
+          {scanShelf.length > 0 && (
+            <ScanShelf
+              items={scanShelf}
+              activeIds={activeScanIds}
+              onToggle={id => setActiveScanIds(prev => {
+                const next = new Set(prev)
+                if (next.has(id)) next.delete(id)
+                else next.add(id)
+                return next
+              })}
+              onRemove={id => {
+                setScanShelf(prev => prev.filter(s => s.id !== id))
+                setActiveScanIds(prev => { const next = new Set(prev); next.delete(id); return next })
+              }}
+            />
+          )}
 
           <div className="input-bar">
             <div className="input-wrapper">
@@ -1219,6 +1485,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
             </div>
             <div className="auth-tabs">
               <button className={`auth-tab ${settingsTab === 'general' ? 'active' : ''}`} onClick={() => setSettingsTab('general')}>General</button>
+              <button className={`auth-tab ${settingsTab === 'project' ? 'active' : ''}`} onClick={() => { setSettingsTab('project'); setClearKnowledgeConfirm(false) }}>Project</button>
               <button className={`auth-tab ${settingsTab === 'account' ? 'active' : ''}`} onClick={() => setSettingsTab('account')}>Account</button>
             </div>
             <div className="modal-body">
@@ -1247,6 +1514,62 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
                         </button>
                       ))}
                     </div>
+                  </div>
+                </>
+              )}
+              {settingsTab === 'project' && (
+                <>
+                  <div className="setting-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '8px' }}>
+                    <label style={{ fontWeight: 600 }}>Clear Project Knowledge</label>
+                    <p style={{ fontSize: '12px', color: 'var(--text-dim)', margin: 0 }}>
+                      Deletes all indexed data for this project — Neo4j graph, Qdrant vectors, memory and rules.
+                      After clearing, run a full scan to rebuild from scratch.
+                    </p>
+                    {!clearKnowledgeConfirm ? (
+                      <button
+                        className="auth-connect-btn"
+                        style={{ background: '#c0392b', marginTop: '4px' }}
+                        onClick={() => setClearKnowledgeConfirm(true)}
+                      >
+                        Clear Knowledge
+                      </button>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '4px', width: '100%' }}>
+                        <p style={{ fontSize: '12px', color: '#e74c3c', margin: 0, fontWeight: 600 }}>
+                          This cannot be undone. All indexed data for this project will be permanently deleted.
+                        </p>
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                          <button
+                            className="auth-connect-btn"
+                            style={{ background: '#c0392b' }}
+                            disabled={clearKnowledgeLoading}
+                            onClick={async () => {
+                              setClearKnowledgeLoading(true)
+                              try {
+                                await deleteProjectKnowledge(projectId)
+                                setClearKnowledgeConfirm(false)
+                                setShowSettings(false)
+                                setMessages([{ id: 'sys-cleared', role: 'system', content: 'Project knowledge cleared. Run /full-scan to reindex.' }])
+                              } catch (e: any) {
+                                setMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'system', content: `Failed to clear: ${e.message}` }])
+                              } finally {
+                                setClearKnowledgeLoading(false)
+                              }
+                            }}
+                          >
+                            {clearKnowledgeLoading ? 'Clearing…' : 'Yes, delete everything'}
+                          </button>
+                          <button
+                            className="auth-connect-btn"
+                            style={{ background: '#555' }}
+                            disabled={clearKnowledgeLoading}
+                            onClick={() => setClearKnowledgeConfirm(false)}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </>
               )}
@@ -1368,12 +1691,13 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
       {pendingEdit && (
         <DiffDialog
           proposal={pendingEdit}
-          onAccept={() => {
-            applyEdit(pendingEdit)
+          loading={applyBusy}
+          onAccept={async () => {
+            await applyEdit(pendingEdit)
             setPendingEdit(null)
           }}
-          onAcceptAll={() => {
-            applyEdit(pendingEdit)
+          onAcceptAll={async () => {
+            await applyEdit(pendingEdit)
             setAcceptAll(true)
             setPendingEdit(null)
             addSystem('Accept all enabled — remaining edits in this chat will be applied automatically.')
@@ -1407,9 +1731,152 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   )
 }
 
+// ── ChangesPanel ──────────────────────────────────────────────────────────────
+
+function ChangesPanel({
+  fileChanges,
+  todos,
+  onClose,
+}: {
+  fileChanges: FileChange[]
+  todos: TodoItem[]
+  onClose: () => void
+}) {
+  const grouped = { create: [] as FileChange[], update: [] as FileChange[], delete: [] as FileChange[] }
+  for (const c of fileChanges) {
+    if (grouped[c.action]) grouped[c.action].push(c)
+  }
+
+  return (
+    <div className="changes-panel">
+      <div className="changes-panel-header">
+        <span className="changes-panel-title">Session Changes</span>
+        <button className="changes-panel-close" onClick={onClose}>&#10005;</button>
+      </div>
+      <div className="changes-panel-body">
+        {fileChanges.length === 0 && todos.length === 0 && (
+          <div className="changes-empty">No changes or todos yet in this session.</div>
+        )}
+
+        {fileChanges.length > 0 && (
+          <div className="changes-section">
+            <div className="changes-section-title">Files Changed</div>
+            {(['create', 'update', 'delete'] as const).map(action =>
+              grouped[action].length > 0 ? (
+                <div key={action} className="changes-action-group">
+                  <div className={`changes-action-label changes-action-${action}`}>
+                    {action === 'create' ? '+ Created' : action === 'update' ? '~ Updated' : '- Deleted'}
+                  </div>
+                  {grouped[action].map(c => (
+                    <div key={c.id} className="changes-file-row">
+                      <span className="changes-file-path">{c.file_path.split('/').pop()}</span>
+                      {c.summary && <span className="changes-file-summary">{c.summary}</span>}
+                    </div>
+                  ))}
+                </div>
+              ) : null
+            )}
+          </div>
+        )}
+
+        {todos.length > 0 && (
+          <div className="changes-section">
+            <div className="changes-section-title">Todos</div>
+            {todos.map(t => (
+              <div key={t.id} className={`changes-todo-row${t.completed ? '' : ' changes-todo-pending'}`}>
+                {t.completed ? '✓' : '⚠'} {t.text}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── InlineEditCard ────────────────────────────────────────────────────────────
+
+function InlineEditCard({
+  proposal,
+  onApply,
+  onReject,
+}: {
+  proposal: FileEditProposal
+  onApply: (p: FileEditProposal) => Promise<void>
+  onReject: (p: FileEditProposal) => void
+}) {
+  const [status, setStatus] = useState<'pending' | 'applying' | 'accepted' | 'rejected'>('pending')
+
+  async function handleAccept() {
+    setStatus('applying')
+    try {
+      await onApply(proposal)
+      setStatus('accepted')
+    } catch {
+      setStatus('pending')
+    }
+  }
+
+  function handleReject() {
+    onReject(proposal)
+    setStatus('rejected')
+  }
+
+  return (
+    <div className="inline-edit-card">
+      <div className="inline-edit-header">
+        <span className="inline-edit-icon">±</span>
+        <span className="inline-edit-path">{proposal.file_path}</span>
+      </div>
+      {proposal.description && (
+        <p className="inline-edit-desc">{proposal.description}</p>
+      )}
+      <div className="inline-edit-diff">
+        {proposal.original_snippet && (
+          <pre className="inline-edit-old">{proposal.original_snippet}</pre>
+        )}
+        <pre className="inline-edit-new">{proposal.new_snippet}</pre>
+      </div>
+      {status === 'pending' && (
+        <div className="inline-edit-actions">
+          <button className="btn-reject" onClick={handleReject}>Reject</button>
+          <button className="btn-accept" onClick={handleAccept}>Accept</button>
+        </div>
+      )}
+      {status === 'applying' && (
+        <div className="inline-edit-status">Applying…</div>
+      )}
+      {status === 'accepted' && (
+        <div className="inline-edit-status inline-edit-accepted">✓ Applied</div>
+      )}
+      {status === 'rejected' && (
+        <div className="inline-edit-status inline-edit-rejected">✗ Rejected</div>
+      )}
+    </div>
+  )
+}
+
 // ── MessageBubble ─────────────────────────────────────────────────────────────
 
-function MessageBubble({ message }: { message: DisplayMessage }) {
+function MessageBubble({
+  message,
+  onApplyEdit,
+  onRejectEdit,
+}: {
+  message: DisplayMessage
+  onApplyEdit?: (p: FileEditProposal) => Promise<void>
+  onRejectEdit?: (p: FileEditProposal) => void
+}) {
+  if (message.role === 'file-edit' && message.fileEdit) {
+    return (
+      <InlineEditCard
+        proposal={message.fileEdit}
+        onApply={onApplyEdit!}
+        onReject={onRejectEdit!}
+      />
+    )
+  }
+
   const cls = `message message-${message.role}`
   return (
     <div className={cls}>
@@ -1424,7 +1891,7 @@ function MessageBubble({ message }: { message: DisplayMessage }) {
       )}
       {message.role === 'user' && <div className="message-header"><span className="sender">You</span></div>}
       {message.role === 'assistant'
-        ? <div className="message-content markdown"><ReactMarkdown>{message.content}</ReactMarkdown></div>
+        ? <div className="message-content markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>
         : <pre className="message-content">{message.content}</pre>
       }
     </div>

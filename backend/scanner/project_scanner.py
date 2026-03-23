@@ -2,41 +2,72 @@
 TypeScript/JavaScript via regex), writes class/function nodes to Neo4j,
 and saves a project memory summary to PostgreSQL.
 """
+import asyncio
 import ast
+import json
 import logging
 import os
 import re
 from pathlib import Path
 
+from config import settings
 from storage.neo4j_client import neo4j_client
 from storage import memory_service
-from storage.qdrant_client import qdrant_client, COLLECTION_FILES, EMBEDDING_DIM
+from storage.qdrant_client import qdrant_client, COLLECTION_FILES, COLLECTION_DOCS, EMBEDDING_DIM
 from scanner.import_resolver import resolve_and_write_edges
+from scanner.validator import validate_parsed_file
+from scanner.role_inference import (
+    RoleResult,
+    infer_role_heuristic,
+    refine_role_with_graph,
+    build_imported_by_index,
+)
+
+DOC_EXTENSIONS: set[str] = {".md", ".pdf"}
+
+# Module-level singleton — loading the model once takes ~1 s; subsequent calls are fast.
+_embedding_model = None
+
+
+def _get_embedding_model():
+    global _embedding_model
+    if _embedding_model is None:
+        from sentence_transformers import SentenceTransformer
+        _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+    return _embedding_model
+
 
 def _generate_embedding(class_names: list[str], file_path: str, layer: str, methods: list[str]) -> list[float]:
-    """Generate a 1536-dim embedding via OpenAI text-embedding-3-small.
-    Falls back to zero vector if no API key is configured.
+    """Generate a 384-dim embedding using sentence-transformers all-MiniLM-L6-v2.
+    Runs locally — no API key or external service required.
     """
-    from config import settings
-    from storage.qdrant_client import EMBEDDING_DIM
     text = f"{' '.join(class_names)} {file_path} {layer} {' '.join(methods)}"
-    api_key = getattr(settings, "openai_api_key", None)
-    if not api_key:
-        return [0.0] * EMBEDDING_DIM
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key)
-        response = client.embeddings.create(model="text-embedding-3-small", input=text)
-        return response.data[0].embedding
+        model = _get_embedding_model()
+        vector = model.encode(text, normalize_embeddings=True)
+        return vector.tolist()
     except Exception as e:
         logger.warning("Embedding generation failed: %s — using zero vector", e)
+        from storage.qdrant_client import EMBEDDING_DIM
         return [0.0] * EMBEDDING_DIM
 
 logger = logging.getLogger(__name__)
 
 SOURCE_EXTENSIONS: set[str] = {".py", ".ts", ".tsx", ".js", ".jsx", ".kt", ".java", ".go"}
-SKIP_DIRS: set[str] = {"node_modules", "venv", ".venv", ".git", "__pycache__", "build", "dist", "target",
-                       ".claude", "memory", "worktrees"}
+
+# Skipped only at the ROOT level of the scanned project (depth == 1 from root_path).
+# These are common output/tooling dirs that should not be indexed, but the same
+# name deeper in the tree (e.g. a "dist" module inside a monorepo) is fine.
+ROOT_SKIP_DIRS: set[str] = {
+    "node_modules", "venv", ".venv", "env", ".env", "virtualenv",
+    ".git", "__pycache__", "dist", "target", "build", "out",
+    ".gradle", ".mvn", ".idea", ".vscode", ".claude", "worktrees",
+    "migrations",
+}
+
+# Always skipped at every depth — these are universally noise and never contain
+# user source code regardless of where they appear in the tree.
+ALWAYS_SKIP_DIRS: set[str] = {"node_modules", "__pycache__", ".git", "venv", ".venv", "worktrees"}
 
 _LAYER_RULES: list[tuple[tuple[str, ...], str]] = [
     (("Controller", "Router", "Handler", "Resolver"), "Controller"),
@@ -77,29 +108,61 @@ def _walk_source_files(root_path: str) -> list[str]:
     if not os.path.isdir(root_path):
         raise FileNotFoundError(f"root_path does not exist: {root_path}")
 
+    logger.info("Scan: walking root_path=%s", root_path)
+
     # Prevent the scanner from indexing its own backend directory.
     # __file__ is  .../backend/scanner/project_scanner.py
     # backend_dir  is  .../backend
-    backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    # If backend_dir lives inside the scanned project, collect its absolute
-    # path so we can prune it during the walk.
-    backend_dir_to_skip: str | None = (
-        backend_dir if backend_dir.startswith(root_path) else None
-    )
+    backend_dir = os.path.abspath(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # Use commonpath to check if backend_dir is actually inside root_path —
+    # avoids the startswith string-prefix bug where "/mnt/c/proj-backend"
+    # would incorrectly match root_path="/mnt/c/proj".
+    try:
+        backend_dir_to_skip: str | None = (
+            backend_dir
+            if os.path.commonpath([backend_dir, root_path]) == root_path
+            else None
+        )
+    except ValueError:
+        # commonpath raises ValueError on Windows when paths are on different drives
+        backend_dir_to_skip = None
 
     found: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root_path):
-        # Skip well-known noise directories (by basename).
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-        # Skip the backend directory itself when the project root is a parent.
-        if backend_dir_to_skip:
-            dirnames[:] = [
-                d for d in dirnames
-                if os.path.abspath(os.path.join(dirpath, d)) != backend_dir_to_skip
-            ]
+        is_root = os.path.abspath(dirpath) == os.path.abspath(root_path)
+
+        pruned: list[str] = []
+        for d in dirnames:
+            abs_d = os.path.abspath(os.path.join(dirpath, d))
+
+            # Always skip universally-noisy dirs at any depth.
+            if d in ALWAYS_SKIP_DIRS:
+                logger.info("Scan: skipping dir=%s reason=always_skip", abs_d)
+                continue
+
+            # At root level only, also skip build-output and tooling dirs.
+            if is_root and d in ROOT_SKIP_DIRS:
+                logger.info("Scan: skipping dir=%s reason=root_skip_dirs", abs_d)
+                continue
+
+            # Skip the CodeLM backend dir when it lives inside the scanned project.
+            if backend_dir_to_skip and abs_d == backend_dir_to_skip:
+                logger.info("Scan: skipping dir=%s reason=codelm_backend", abs_d)
+                continue
+
+            pruned.append(d)
+
+        dirnames[:] = pruned
+
         for fname in filenames:
             if Path(fname).suffix in SOURCE_EXTENSIONS:
                 found.append(os.path.join(dirpath, fname))
+
+    if not found:
+        logger.warning("Scan: 0 source files found under '%s' — verify the path is correct", root_path)
+    elif len(found) < 5:
+        logger.warning("Scan: only %d source files found under '%s' — "
+                       "this seems low; verify root_path is the project root", len(found), root_path)
     return found
 
 
@@ -139,34 +202,151 @@ def _parse_python_file(file_path: str) -> dict:
 _TS_JS_EXTENSIONS: set[str] = {".ts", ".tsx", ".js", ".jsx"}
 _JAVA_EXTENSIONS: set[str] = {".java"}
 
+# Printed once per process when tree-sitter Java is enabled so the developer
+# knows a full scan is needed for a consistent graph.
+_TS_CONSISTENCY_WARNED: bool = False
 
-def _parse_java_file(file_path: str) -> dict:
-    """Extract classes, interfaces, enums, records, and public methods from a Java file
-    using regex patterns.  Returns the same shape as _parse_python_file.
+_JAVA_KEYWORDS = {
+    "if", "for", "while", "switch", "catch", "return", "new",
+    "throw", "assert", "else", "do", "try", "finally", "synchronized",
+    "instanceof", "import", "package", "class", "interface", "enum", "record",
+}
+
+
+# ── Tree-sitter validation ────────────────────────────────────────────────────
+
+def _validate_java_parse_result(result: dict, source_content: str) -> bool:
+    """Return True if *result* contains a usable class list.
+
+    Rules (per spec):
+      1. classes must be a list
+      2. every entry must be a non-empty string
+      3. every name must be shorter than 200 characters
+      4. every name must appear literally in the source content
+      5. no duplicates within the list
+    """
+    classes = result.get("classes")
+    if not isinstance(classes, list):
+        return False
+    seen: set[str] = set()
+    for cls in classes:
+        if not isinstance(cls, str) or not cls.strip():
+            return False
+        if len(cls) >= 200:
+            return False
+        if cls not in source_content:
+            return False
+        if cls in seen:
+            return False
+        seen.add(cls)
+    return True
+
+
+# ── Discrepancy persistence (async, fire-and-forget) ──────────────────────────
+
+async def _write_parser_discrepancy(
+    project_id: str,
+    file_path: str,
+    regex_classes: list[str],
+    ts_classes: list[str],
+    regex_count: int,
+    ts_count: int,
+    confidence: str,
+    parser_used: str,
+) -> None:
+    """Persist one parser comparison row, replacing any prior row for the same file."""
+    try:
+        from sqlalchemy import delete as _sa_delete
+        from storage.postgres import get_pg_session
+        from storage.models import ParserDiscrepancy
+        async with get_pg_session() as session:
+            # Deduplicate: one row per (project_id, file_path)
+            await session.execute(
+                _sa_delete(ParserDiscrepancy).where(
+                    ParserDiscrepancy.project_id == project_id,
+                    ParserDiscrepancy.file_path == file_path,
+                )
+            )
+            session.add(ParserDiscrepancy(
+                project_id=project_id,
+                file_path=file_path,
+                regex_classes=json.dumps(regex_classes[:50]),
+                ts_classes=json.dumps(ts_classes[:50]),
+                regex_count=regex_count,
+                ts_count=ts_count,
+                confidence=confidence,
+                parser_used=parser_used,
+            ))
+    except Exception as exc:
+        logger.error(
+            "[Java Parse] discrepancy DB write failed for %s: %s",
+            os.path.basename(file_path), exc,
+        )
+
+
+def _schedule_discrepancy_write(
+    project_id: str,
+    file_path: str,
+    regex_classes: list[str],
+    ts_classes: list[str],
+    regex_count: int,
+    ts_count: int,
+    confidence: str,
+    parser_used: str,
+) -> None:
+    """Schedule an async discrepancy write without blocking the sync parser."""
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_write_parser_discrepancy(
+            project_id, file_path,
+            regex_classes, ts_classes,
+            regex_count, ts_count,
+            confidence, parser_used,
+        ))
+    except RuntimeError:
+        # No running event loop — skip DB write (pure-sync context)
+        pass
+
+
+# ── Java parsers ──────────────────────────────────────────────────────────────
+
+def _parse_java_file(file_path: str, project_id: str | None = None) -> dict:
+    """Extract classes, interfaces, enums, records, and public methods from a Java file.
+
+    Step 1 always runs the regex parser.
+    Step 2 (when USE_TREE_SITTER_JAVA=True) runs the tree-sitter parser,
+    validates both results, picks the better one, and logs the comparison.
+
+    project_id is optional:
+      - When None (all existing call sites): DB write is skipped, comparison
+        still runs and is logged.
+      - When provided: discrepancy row is written to parser_discrepancies.
 
     Handles:
       - class / abstract class / final class
-      - interface
-      - enum
-      - record (Java 16+)
-      - public/protected/private methods of the form:
-            [annotations] [modifiers] ReturnType methodName(
-    Imports are collected from 'import com.example.Foo;' style lines.
+      - interface / enum / record (Java 16+)
+      - public/protected/private methods
+      - import statements
     """
+    # ── STEP 1: Regex parser (always runs) ───────────────────────────────────
     with open(file_path, "r", encoding="utf-8", errors="replace") as f:
         source = f.read()
 
-    # Strip line comments (// ...) and block comments (/* ... */) so that words
-    # inside comment text don't produce false-positive matches.
+    # Strip line/block comments to avoid false-positive matches inside comment text.
     source_no_comments = re.sub(r'//[^\n]*', '', source)
     source_no_comments = re.sub(r'/\*.*?\*/', '', source_no_comments, flags=re.DOTALL)
 
     classes: list[str] = []
     functions: list[str] = []
     imports: list[str] = []
+    package: str = ""
+
+    # Package declaration: package com.example.service;
+    pkg_match = re.search(r'^\s*package\s+([\w.]+)\s*;', source, re.MULTILINE)
+    if pkg_match:
+        package = pkg_match.group(1)
 
     # Type declarations: class, interface, enum, record
-    # Matches optional modifiers (public, abstract, final, static) before the keyword.
     for m in re.finditer(
         r'(?:(?:public|protected|private|abstract|final|static)\s+)*'
         r'(?:class|interface|enum|record)\s+([A-Za-z_$][A-Za-z0-9_$]*)',
@@ -174,25 +354,13 @@ def _parse_java_file(file_path: str) -> dict:
     ):
         classes.append(m.group(1))
 
-    # Method declarations: capture the method name just before the opening parenthesis.
-    # Requires at least one visibility or modifier keyword so that bare variable
-    # declarations (int clampedDays = ...) and annotation-only lines are not matched.
-    # Matches lines like:
-    #   public DashboardResponse getDashboard(
-    #   private Merchant requireMerchant(
-    #   public static void main(
-    #   @Override public List<Foo> getProfitByProduct(
-    _JAVA_KEYWORDS = {
-        "if", "for", "while", "switch", "catch", "return", "new",
-        "throw", "assert", "else", "do", "try", "finally", "synchronized",
-        "instanceof", "import", "package", "class", "interface", "enum", "record",
-    }
+    # Method declarations
     for m in re.finditer(
-        r'(?:@\w+\s+)*'                          # optional leading annotations
+        r'(?:@\w+\s+)*'
         r'(?:public|protected|private|static|final|abstract|synchronized|native|default|override)'
         r'(?:\s+(?:public|protected|private|static|final|abstract|synchronized|native|default|override))*'
-        r'\s+[\w<>\[\],\s]+?\s+'                 # return type (non-greedy)
-        r'([a-z_$][A-Za-z0-9_$]*)\s*\(',        # method name starts with lowercase
+        r'\s+[\w<>\[\],\s]+?\s+'
+        r'([a-z_$][A-Za-z0-9_$]*)\s*\(',
         source_no_comments,
     ):
         name = m.group(1)
@@ -201,10 +369,194 @@ def _parse_java_file(file_path: str) -> dict:
 
     # Import statements: import com.example.foo.Bar;
     for m in re.finditer(r'^\s*import\s+(?:static\s+)?([\w.]+)\s*;', source, re.MULTILINE):
-        # Store the top-level package prefix (e.g. 'com.example.foo') for grouping
         imports.append(m.group(1))
 
-    return {"classes": classes, "functions": functions, "imports": imports}
+    regex_result = {"classes": classes, "functions": functions, "imports": imports, "package": package}
+
+    # ── STEP 2: Feature-flag gate ─────────────────────────────────────────────
+    if not settings.use_tree_sitter_java:
+        return regex_result
+
+    # Log the graph-consistency notice once per process start.
+    global _TS_CONSISTENCY_WARNED
+    if not _TS_CONSISTENCY_WARNED:
+        logger.warning(
+            "Tree-sitter enabled. For consistency, run a full scan to rebuild graph."
+        )
+        _TS_CONSISTENCY_WARNED = True
+
+    # ── STEP 3: Tree-sitter parse ─────────────────────────────────────────────
+    try:
+        from scanner.java_treesitter import _parse_java_treesitter
+        ts_result = _parse_java_treesitter(file_path)
+    except Exception as exc:
+        logger.error(
+            "[Java Parse] tree-sitter failed for %s: %s — falling back to regex",
+            os.path.basename(file_path), exc,
+        )
+        return regex_result
+
+    # ── STEP 4: Validate both results ─────────────────────────────────────────
+    regex_valid = _validate_java_parse_result(regex_result, source)
+    ts_valid = _validate_java_parse_result(ts_result, source)
+
+    regex_count = len(regex_result.get("classes", []))
+    ts_count = len(ts_result.get("classes", []))
+
+    # ── STEP 5: Decision logic ────────────────────────────────────────────────
+    if not ts_valid and not regex_valid:
+        parser_used = "regex"
+        confidence = "low"
+        chosen = regex_result
+    elif not ts_valid:
+        parser_used = "regex"
+        confidence = "low"
+        chosen = regex_result
+    elif not regex_valid:
+        # Regex produced garbage; trust tree-sitter
+        if ts_count > 0:
+            confidence = "medium"
+        else:
+            confidence = "low"
+        parser_used = "tree-sitter"
+        chosen = ts_result
+    elif ts_count >= regex_count:
+        parser_used = "tree-sitter"
+        confidence = "high"
+        chosen = ts_result
+    elif ts_count > 0:
+        parser_used = "tree-sitter"
+        confidence = "medium"
+        chosen = ts_result
+    else:
+        # ts_count == 0 and regex_count > 0
+        parser_used = "regex"
+        confidence = "low"
+        chosen = regex_result
+
+    # ── STEP 6: Log ──────────────────────────────────────────────────────────
+    logger.info(
+        "[Java Parse] file=%s | ts=%d regex=%d | using=%s | confidence=%s",
+        os.path.basename(file_path), ts_count, regex_count, parser_used, confidence,
+    )
+
+    # ── STEP 7: DB write (fire-and-forget, only when project_id is known) ────
+    if project_id is not None:
+        _schedule_discrepancy_write(
+            project_id=project_id,
+            file_path=file_path,
+            regex_classes=regex_result.get("classes", []),
+            ts_classes=ts_result.get("classes", []),
+            regex_count=regex_count,
+            ts_count=ts_count,
+            confidence=confidence,
+            parser_used=parser_used,
+        )
+
+    # ── STEP 8: Return — always merge regex imports (tree-sitter skips them) ─
+    if parser_used == "tree-sitter":
+        return {
+            **chosen,
+            "imports": regex_result.get("imports", []),
+            "package": chosen.get("package") or regex_result.get("package", ""),
+        }
+    return regex_result
+
+
+def _parse_kotlin_file(file_path: str) -> dict:
+    """Extract classes, functions, and imports from a Kotlin file.
+    Kotlin syntax is close enough to Java for regex-based extraction to work:
+    class/object/interface declarations and fun declarations map directly.
+    Reuses the Java parser internals with Kotlin-specific additions.
+    """
+    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        source = f.read()
+
+    source_no_comments = re.sub(r'//[^\n]*', '', source)
+    source_no_comments = re.sub(r'/\*.*?\*/', '', source_no_comments, flags=re.DOTALL)
+
+    classes: list[str] = []
+    functions: list[str] = []
+    imports: list[str] = []
+    package: str = ""
+
+    pkg_match = re.search(r'^\s*package\s+([\w.]+)', source, re.MULTILINE)
+    if pkg_match:
+        package = pkg_match.group(1)
+
+    # class / data class / sealed class / abstract class / object / interface / enum class
+    for m in re.finditer(
+        r'(?:(?:public|private|protected|internal|abstract|sealed|data|open|final|inner|companion)\s+)*'
+        r'(?:class|object|interface|enum\s+class)\s+([A-Za-z_$][A-Za-z0-9_$]*)',
+        source_no_comments,
+    ):
+        classes.append(m.group(1))
+
+    # fun declarations
+    _KT_KEYWORDS = {"if", "for", "while", "when", "catch", "finally"}
+    for m in re.finditer(
+        r'(?:(?:public|private|protected|internal|override|suspend|inline|operator|infix|tailrec)\s+)*'
+        r'fun\s+(?:<[^>]*>\s*)?([a-zA-Z_$][A-Za-z0-9_$]*)\s*\(',
+        source_no_comments,
+    ):
+        name = m.group(1)
+        if name not in _KT_KEYWORDS and name not in functions:
+            functions.append(name)
+
+    # import statements
+    for m in re.finditer(r'^\s*import\s+([\w.]+)', source, re.MULTILINE):
+        imports.append(m.group(1))
+
+    return {"classes": classes, "functions": functions, "imports": imports, "package": package}
+
+
+def _parse_go_file(file_path: str) -> dict:
+    """Extract package name, func declarations, and imports from a Go file
+    using regex.  Returns the same shape as the other parsers.
+    """
+    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        source = f.read()
+
+    source_no_comments = re.sub(r'//[^\n]*', '', source)
+    source_no_comments = re.sub(r'/\*.*?\*/', '', source_no_comments, flags=re.DOTALL)
+
+    classes: list[str] = []   # Go has no classes; type declarations go here
+    functions: list[str] = []
+    imports: list[str] = []
+    package: str = ""
+
+    pkg_match = re.search(r'^\s*package\s+(\w+)', source, re.MULTILINE)
+    if pkg_match:
+        package = pkg_match.group(1)
+
+    # type declarations: structs and interfaces (Go's equivalent of classes)
+    for m in re.finditer(r'\btype\s+([A-Z][A-Za-z0-9_]*)\s+(?:struct|interface)\b', source_no_comments):
+        classes.append(m.group(1))
+
+    # func and method declarations
+    # func Name(      — top-level function
+    # func (r Recv) Name(  — method on a receiver
+    for m in re.finditer(
+        r'\bfunc\s+(?:\([^)]*\)\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(',
+        source_no_comments,
+    ):
+        name = m.group(1)
+        if name not in functions:
+            functions.append(name)
+
+    # import blocks:  import "pkg"  or  import ( "pkg"\n "pkg2" )
+    # Single import
+    for m in re.finditer(r'\bimport\s+"([\w./\-]+)"', source):
+        imports.append(m.group(1))
+    # Grouped import block
+    block_match = re.search(r'\bimport\s*\(([^)]*)\)', source, re.DOTALL)
+    if block_match:
+        for m in re.finditer(r'"([\w./\-]+)"', block_match.group(1)):
+            pkg = m.group(1)
+            if pkg not in imports:
+                imports.append(pkg)
+
+    return {"classes": classes, "functions": functions, "imports": imports, "package": package}
 
 
 def _classify_layer_from_path(file_path: str) -> str | None:
@@ -368,13 +720,30 @@ def _parse_ts_js_file(file_path: str) -> dict:
     }
 
 
-async def _write_class_to_neo4j(class_name: str, file_path: str, project_id: str, layer: str) -> None:
+async def _write_class_to_neo4j(
+    class_name: str,
+    file_path: str,
+    project_id: str,
+    layer: str,
+    package: str = "",
+    role_confidence: float = 0.0,
+    role_source: str = "default",
+) -> None:
     cypher = (
         "MERGE (c:Class {name: $name, project_id: $project_id}) "
-        "SET c.file_path = $file_path, c.layer = $layer"
+        "SET c.file_path = $file_path, c.layer = $layer, c.package = $package, "
+        "c.inferred_role = $layer, c.role_confidence = $role_confidence, "
+        "c.role_source = $role_source"
     )
-    await neo4j_client.execute(cypher, {"name": class_name, "project_id": project_id,
-                                        "file_path": file_path, "layer": layer})
+    await neo4j_client.execute(cypher, {
+        "name": class_name,
+        "project_id": project_id,
+        "file_path": file_path,
+        "layer": layer,
+        "package": package,
+        "role_confidence": role_confidence,
+        "role_source": role_source,
+    })
 
 
 async def _write_function_to_neo4j(func_name: str, file_path: str, project_id: str) -> None:
@@ -410,7 +779,7 @@ def _find_build_files(root_path: str, filename: str, max_depth: int = 2) -> list
     root = Path(root_path)
     try:
         for dirpath, dirnames, filenames in os.walk(root_path):
-            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+            dirnames[:] = [d for d in dirnames if d not in ALWAYS_SKIP_DIRS]
             try:
                 depth = len(Path(dirpath).relative_to(root).parts)
             except ValueError:
@@ -739,6 +1108,266 @@ def _infer_language_from_extensions(source_files: list[str]) -> str:
     return max(counts, key=lambda k: counts[k])
 
 
+def _read_doc_text(file_path: str) -> str | None:
+    """Extract plain text from a documentation file.
+
+    .md  — read as UTF-8 text directly.
+    .pdf — attempt PyMuPDF (fitz), then pdfplumber.  Returns None if no
+           PDF library is available or extraction fails.
+    """
+    ext = Path(file_path).suffix.lower()
+    if ext == ".md":
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                return f.read()
+        except OSError as e:
+            logger.warning("Doc read failed for %s: %s", file_path, e)
+            return None
+
+    if ext == ".pdf":
+        # Try PyMuPDF first (faster, more reliable)
+        try:
+            import fitz  # PyMuPDF
+            doc = fitz.open(file_path)
+            pages = [page.get_text() for page in doc]
+            doc.close()
+            text = "\n".join(pages).strip()
+            return text if text else None
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning("PyMuPDF extraction failed for %s: %s", file_path, e)
+
+        # Fall back to pdfplumber
+        try:
+            import pdfplumber
+            with pdfplumber.open(file_path) as pdf:
+                pages = [p.extract_text() or "" for p in pdf.pages]
+            text = "\n".join(pages).strip()
+            return text if text else None
+        except ImportError:
+            logger.debug("No PDF library (fitz / pdfplumber) — skipping %s", file_path)
+        except Exception as e:
+            logger.warning("pdfplumber extraction failed for %s: %s", file_path, e)
+
+    return None
+
+
+async def _index_docs(
+    project_id: str,
+    root_path: str,
+    scan_mode: str,
+) -> int:
+    """Walk the project tree for .md and .pdf files, extract text, and upsert
+    into the COLLECTION_DOCS Qdrant collection.
+
+    Returns the number of documents successfully indexed.
+    """
+    import hashlib
+    from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue
+
+    if not qdrant_client.is_connected:
+        return 0
+
+    # Collect doc files using the same skip logic as source files
+    doc_files: list[str] = []
+    abs_root = os.path.abspath(root_path)
+    for dirpath, dirnames, filenames in os.walk(root_path):
+        is_root = os.path.abspath(dirpath) == abs_root
+        pruned: list[str] = []
+        for d in dirnames:
+            if d in ALWAYS_SKIP_DIRS:
+                continue
+            if is_root and d in ROOT_SKIP_DIRS:
+                continue
+            pruned.append(d)
+        dirnames[:] = pruned
+        for fname in filenames:
+            if Path(fname).suffix.lower() in DOC_EXTENSIONS:
+                doc_files.append(os.path.join(dirpath, fname))
+
+    if not doc_files:
+        return 0
+
+    # On full scan wipe existing docs so stale files don't persist
+    if scan_mode == "full":
+        try:
+            await qdrant_client.client.delete(
+                collection_name=COLLECTION_DOCS,
+                points_selector=Filter(
+                    must=[FieldCondition(key="project_id", match=MatchValue(value=project_id))]
+                ),
+            )
+        except Exception:
+            logger.warning("Scan [%s]: Qdrant doc pre-delete failed — continuing", project_id, exc_info=True)
+
+    indexed = 0
+    points: list[PointStruct] = []
+    BATCH_SIZE = 50
+
+    for fpath in doc_files:
+        text = _read_doc_text(fpath)
+        if not text:
+            continue
+
+        title = Path(fpath).name
+        # Truncate to 8000 chars for embedding — full text stored in payload
+        embed_text = f"{title} {text[:8000]}"
+        embedding = _generate_embedding(
+            class_names=[title],
+            file_path=fpath,
+            layer="docs",
+            methods=[],
+        )
+        raw_id = hashlib.md5(f"{project_id}:doc:{fpath}".encode()).hexdigest()
+        point_id = int(raw_id[:16], 16)
+
+        points.append(PointStruct(
+            id=point_id,
+            vector=embedding,
+            payload={
+                "project_id": project_id,
+                "file_path": fpath,
+                "title": title,
+                "type": "docs",
+                "content": text[:32000],  # store up to 32k chars in payload
+            },
+        ))
+        indexed += 1
+
+        if len(points) >= BATCH_SIZE:
+            try:
+                await qdrant_client.client.upsert(collection_name=COLLECTION_DOCS, points=points)
+            except Exception:
+                logger.warning("Scan [%s]: doc batch upsert failed", project_id, exc_info=True)
+            points = []
+
+    if points:
+        try:
+            await qdrant_client.client.upsert(collection_name=COLLECTION_DOCS, points=points)
+        except Exception:
+            logger.warning("Scan [%s]: doc final upsert failed", project_id, exc_info=True)
+
+    logger.info("Scan [%s]: indexed %d doc files into %s", project_id, indexed, COLLECTION_DOCS)
+    return indexed
+
+
+async def _discover_patterns(project_id: str, parsed_files: list[dict]) -> list[str]:
+    """Analyze the Neo4j import graph and class naming patterns discovered
+    during scanning.  Returns a list of human-readable pattern strings that
+    describe ACTUAL structural behaviour observed in THIS codebase.
+
+    These are NOT hardcoded rules — they are measurements derived from the graph.
+    Example outputs:
+      "7/8 classes named *Controller import at least one *Service class (88%)"
+      "0/7 classes named *Repository are imported by any *Controller class"
+      "Module 'auth' has 12 incoming IMPORTS edges, all from 'api' module"
+    """
+    if not neo4j_client.is_connected:
+        return []
+
+    patterns: list[str] = []
+
+    # ── Pattern 1: Layer cross-call rates ─────────────────────────────────────
+    # For each source layer S and target layer T, count how many nodes in S
+    # have at least one IMPORTS edge pointing to a node in T.
+    try:
+        layer_cypher = """
+            MATCH (a:Class)-[:IMPORTS]->(b:Class)
+            WHERE a.project_id = $project_id AND b.project_id = $project_id
+                  AND a.layer IS NOT NULL AND b.layer IS NOT NULL
+            RETURN a.layer AS from_layer, b.layer AS to_layer, count(DISTINCT a) AS callers
+        """
+        edges = await neo4j_client.query(layer_cypher, {"project_id": project_id})
+
+        # Count total nodes per layer
+        count_cypher = """
+            MATCH (n:Class) WHERE n.project_id = $project_id AND n.layer IS NOT NULL
+            RETURN n.layer AS layer, count(n) AS total
+        """
+        counts_raw = await neo4j_client.query(count_cypher, {"project_id": project_id})
+        layer_totals: dict[str, int] = {r["layer"]: r["total"] for r in counts_raw}
+
+        for row in edges:
+            fl, tl, callers = row["from_layer"], row["to_layer"], row["callers"]
+            total = layer_totals.get(fl, 0)
+            if total == 0:
+                continue
+            pct = round(callers / total * 100)
+            patterns.append(
+                f"{callers}/{total} {fl} classes ({pct}%) import at least one {tl} class"
+            )
+    except Exception as e:
+        logger.warning("Pattern discovery: layer edge query failed: %s", e)
+
+    # ── Pattern 2: Isolated layers (no incoming edges from any other layer) ───
+    try:
+        isolated_cypher = """
+            MATCH (n:Class) WHERE n.project_id = $project_id AND n.layer IS NOT NULL
+            AND NOT EXISTS {
+                MATCH (other:Class)-[:IMPORTS]->(n)
+                WHERE other.project_id = $project_id AND other.layer <> n.layer
+            }
+            RETURN n.layer AS layer, count(n) AS isolated
+        """
+        isolated_rows = await neo4j_client.query(isolated_cypher, {"project_id": project_id})
+        for row in isolated_rows:
+            lyr, iso = row["layer"], row["isolated"]
+            total = layer_totals.get(lyr, 0) if 'layer_totals' in dir() else 0
+            if iso > 0 and total > 0 and iso == total:
+                patterns.append(
+                    f"{lyr} layer ({iso} classes) has no incoming cross-layer IMPORTS edges"
+                )
+    except Exception as e:
+        logger.warning("Pattern discovery: isolation query failed: %s", e)
+
+    # ── Pattern 3: Module-level fan-in / fan-out ──────────────────────────────
+    try:
+        # Use package name if available, otherwise derive from file path top segment
+        module_edges_cypher = """
+            MATCH (a:Class)-[:IMPORTS]->(b:Class)
+            WHERE a.project_id = $project_id AND b.project_id = $project_id
+            WITH
+                CASE WHEN a.package IS NOT NULL AND a.package <> ''
+                     THEN split(a.package, '.')[0]
+                     ELSE null END AS from_mod,
+                CASE WHEN b.package IS NOT NULL AND b.package <> ''
+                     THEN split(b.package, '.')[0]
+                     ELSE null END AS to_mod,
+                count(*) AS edge_count
+            WHERE from_mod IS NOT NULL AND to_mod IS NOT NULL AND from_mod <> to_mod
+            RETURN from_mod, to_mod, edge_count
+            ORDER BY edge_count DESC
+            LIMIT 10
+        """
+        mod_edges = await neo4j_client.query(module_edges_cypher, {"project_id": project_id})
+        for row in mod_edges:
+            patterns.append(
+                f"Module '{row['from_mod']}' has {row['edge_count']} import edge(s) into module '{row['to_mod']}'"
+            )
+    except Exception as e:
+        logger.warning("Pattern discovery: module edge query failed: %s", e)
+
+    # ── Pattern 4: Classes with no outgoing imports (leaf nodes) ──────────────
+    try:
+        leaf_cypher = """
+            MATCH (n:Class) WHERE n.project_id = $project_id AND n.layer IS NOT NULL
+            AND NOT EXISTS { MATCH (n)-[:IMPORTS]->(:Class {project_id: $project_id}) }
+            RETURN n.layer AS layer, count(n) AS leaves
+        """
+        leaf_rows = await neo4j_client.query(leaf_cypher, {"project_id": project_id})
+        for row in leaf_rows:
+            if row["leaves"] > 0:
+                patterns.append(
+                    f"{row['leaves']} {row['layer']} class(es) have no outgoing imports (leaf nodes)"
+                )
+    except Exception as e:
+        logger.warning("Pattern discovery: leaf node query failed: %s", e)
+
+    logger.info("Scan [%s]: discovered %d structural patterns", project_id, len(patterns))
+    return patterns
+
+
 async def scan_project(
     project_id: str,
     root_path: str,
@@ -785,6 +1414,10 @@ def _smart_scan_files(root_path: str, entry_point: str, max_depth: int = 4) -> l
                 parsed = _parse_python_file(fpath)
             elif ext in _JAVA_EXTENSIONS:
                 parsed = _parse_java_file(fpath)
+            elif ext == ".kt":
+                parsed = _parse_kotlin_file(fpath)
+            elif ext == ".go":
+                parsed = _parse_go_file(fpath)
             elif ext in _TS_JS_EXTENSIONS:
                 parsed = _parse_ts_js_file(fpath)
             else:
@@ -826,6 +1459,10 @@ def _smart_scan_files(root_path: str, entry_point: str, max_depth: int = 4) -> l
                     parsed = _parse_python_file(fpath)
                 elif ext in _JAVA_EXTENSIONS:
                     parsed = _parse_java_file(fpath)
+                elif ext == ".kt":
+                    parsed = _parse_kotlin_file(fpath)
+                elif ext == ".go":
+                    parsed = _parse_go_file(fpath)
                 elif ext in _TS_JS_EXTENSIONS:
                     parsed = _parse_ts_js_file(fpath)
                 else:
@@ -858,6 +1495,16 @@ async def _scan_project_impl(
     root_path = _resolve_path(root_path)
     await memory_service.get_or_create_project(project_id=project_id, name=project_id, root_path=root_path)
 
+    # On a full scan wipe previously auto-generated rules so outdated ones don't linger.
+    # Rules added manually by the developer are deleted too — full scan is a fresh index.
+    if scan_mode == "full":
+        try:
+            deleted = await memory_service.delete_all_rules(project_id)
+            if deleted:
+                logger.info("Scan [%s]: cleared %d stale rules before full rescan", project_id, deleted)
+        except Exception:
+            logger.warning("Scan [%s]: failed to clear stale rules — continuing", project_id, exc_info=True)
+
     if scan_mode == "folder" and folder_path:
         scan_root = _resolve_path(folder_path) if folder_path else root_path
         source_files = _walk_source_files(scan_root)
@@ -868,6 +1515,36 @@ async def _scan_project_impl(
     else:
         source_files = _walk_source_files(root_path)
     logger.info("Scan [%s]: found %d source files in %s", project_id, len(source_files), root_path)
+
+    # ── Ghost node cleanup (folder / smart scans only) ────────────────────────
+    # Full scans wipe and rebuild the entire graph, so no cleanup needed there.
+    # For partial scans, delete all existing Neo4j nodes owned by the files
+    # we are about to rescan — this removes stale class/function nodes and their
+    # edges (DETACH DELETE) before we write fresh ones.
+    if scan_mode in ("folder", "smart") and neo4j_client.is_connected and source_files:
+        try:
+            ghost_deleted = await neo4j_client.query(
+                """
+                MATCH (n)
+                WHERE n.project_id = $project_id
+                  AND n.file_path IN $file_paths
+                WITH n, count(n) AS cnt
+                DETACH DELETE n
+                RETURN cnt
+                """,
+                {"project_id": project_id, "file_paths": list(source_files)},
+            )
+            # The RETURN after DETACH DELETE returns one row per deleted node.
+            n_deleted = len(ghost_deleted)
+            logger.info(
+                "Scan [%s]: ghost cleanup — deleted %d stale nodes for %d rescanned files",
+                project_id, n_deleted, len(source_files),
+            )
+        except Exception:
+            logger.warning(
+                "Scan [%s]: ghost node cleanup failed — continuing without cleanup",
+                project_id, exc_info=True,
+            )
 
     neo4j_available = neo4j_client.is_connected
     if not neo4j_available:
@@ -880,11 +1557,11 @@ async def _scan_project_impl(
     all_classes, all_functions = [], []
     # Accumulate per-file parsed data for Qdrant indexing
     parsed_files: list[dict] = []
+    total_nodes_created = 0
+    total_rejected = 0
 
     for i, fpath in enumerate(source_files):
         ext = Path(fpath).suffix
-        if ext not in (".py",) and ext not in _TS_JS_EXTENSIONS and ext not in _JAVA_EXTENSIONS:
-            continue
         if i % 50 == 0:
             logger.info("Scan [%s]: parsing file %d/%d", project_id, i + 1, len(source_files))
         try:
@@ -892,8 +1569,14 @@ async def _scan_project_impl(
                 parsed = _parse_python_file(fpath)
             elif ext in _JAVA_EXTENSIONS:
                 parsed = _parse_java_file(fpath)
-            else:
+            elif ext == ".kt":
+                parsed = _parse_kotlin_file(fpath)
+            elif ext == ".go":
+                parsed = _parse_go_file(fpath)
+            elif ext in _TS_JS_EXTENSIONS:
                 parsed = _parse_ts_js_file(fpath)
+            else:
+                continue
         except SyntaxError:
             logger.warning("Scan [%s]: syntax error in %s — skipping", project_id, fpath)
             continue
@@ -901,46 +1584,96 @@ async def _scan_project_impl(
             logger.warning("Scan [%s]: failed to parse %s — skipping", project_id, fpath, exc_info=True)
             continue
 
+        # ── Validation layer ─────────────────────────────────────────────────
+        # Strips invalid/suspicious extractions before anything reaches Neo4j.
+        parsed = validate_parsed_file(parsed, fpath)
+        rej = parsed.get("_validation_rejected", {})
+        total_rejected += rej.get("classes", 0) + rej.get("functions", 0)
+
         all_classes.extend(parsed["classes"])
         all_functions.extend(parsed["functions"])
 
-        # Determine layer for this file.
-        # Priority: (1) path-based hint, (2) content-based hint from parser
-        # (layer_hints field, only populated by _parse_ts_js_file),
-        # (3) class-name suffix rule, (4) default "Util".
+        # ── Role inference (Tier 1 — heuristic, per-file) ────────────────────
+        # Uses annotations, path, class-name suffix, content signals.
+        # Tier 2 (import-graph refinement) runs after all files are parsed.
         layer_hints: list[str] = parsed.get("layer_hints", [])
-        path_layer = _classify_layer_from_path(fpath)
-        if path_layer:
-            layer = path_layer
-        elif layer_hints:
-            layer = layer_hints[0]
-        elif parsed["classes"]:
-            layer = _classify_layer(parsed["classes"][0])
-        else:
-            layer = "Util"
+        role_result: RoleResult = infer_role_heuristic(
+            file_path=fpath,
+            classes=parsed["classes"],
+            layer_hints=layer_hints,
+            imports=parsed.get("imports", []),
+        )
+        layer = role_result.role
 
+        pkg = parsed.get("package", "")
         parsed_files.append({
             "file_path": fpath,
             "language": Path(fpath).suffix.lstrip("."),
             "layer": layer,
+            "package": pkg,
             "classes": parsed["classes"],
             "functions": parsed["functions"],
             "imports": parsed.get("imports", []),
             "imports_detailed": parsed.get("imports_detailed", []),
+            "_role_result": role_result,
         })
 
-        if neo4j_available:
-            for class_name in parsed["classes"]:
-                try:
-                    cls_layer = _classify_layer_from_path(fpath) or _classify_layer(class_name)
-                    await _write_class_to_neo4j(class_name, fpath, project_id, cls_layer)
-                except Exception:
-                    logger.warning("Scan [%s]: Neo4j write failed for %s", project_id, class_name, exc_info=True)
-            for func_name in parsed["functions"]:
+        # Neo4j write deferred to post-graph pass (after Tier 2 refinement).
+        for func_name in parsed["functions"]:
+            if neo4j_available:
                 try:
                     await _write_function_to_neo4j(func_name, fpath, project_id)
                 except Exception:
                     logger.warning("Scan [%s]: Neo4j write failed for %s", project_id, func_name, exc_info=True)
+
+    logger.info(
+        "Scan [%s]: parse complete — files=%d nodes_created=%d rejected_entities=%d",
+        project_id, len(source_files), total_nodes_created, total_rejected,
+    )
+
+    # ── Role inference Tier 2: import-graph refinement ────────────────────────
+    # Build an in-memory imported_by index, then refine any non-annotation results.
+    if parsed_files:
+        imported_by_index = build_imported_by_index(parsed_files)
+        upgraded = 0
+        for pf in parsed_files:
+            t1: RoleResult = pf["_role_result"]
+            if t1.source == "annotation":
+                # Tier 1 was definitive; no refinement needed.
+                final_result = t1
+            else:
+                consumed_by = imported_by_index.get(pf["file_path"], [])
+                final_result = refine_role_with_graph(t1, pf["file_path"], consumed_by)
+                if final_result.role != t1.role or final_result.confidence > t1.confidence + 0.01:
+                    upgraded += 1
+            pf["_role_result"] = final_result
+            pf["layer"] = final_result.role  # keep layer in sync
+
+        if upgraded:
+            logger.info(
+                "Scan [%s]: Tier 2 graph refinement upgraded %d file(s)",
+                project_id, upgraded,
+            )
+
+    # ── Deferred Neo4j class writes (uses final Tier 1+2 role) ───────────────
+    if neo4j_available and parsed_files:
+        for pf in parsed_files:
+            final_result = pf.get("_role_result")
+            layer = pf["layer"]
+            pkg = pf.get("package", "")
+            fpath = pf["file_path"]
+            for class_name in pf["classes"]:
+                try:
+                    await _write_class_to_neo4j(
+                        class_name, fpath, project_id, layer, pkg,
+                        role_confidence=final_result.confidence if final_result else 0.0,
+                        role_source=final_result.source if final_result else "default",
+                    )
+                    total_nodes_created += 1
+                except Exception:
+                    logger.warning(
+                        "Scan [%s]: Neo4j write failed for %s", project_id, class_name, exc_info=True
+                    )
 
     # --- IMPORTS / CONTAINS edges ---
     if neo4j_available and parsed_files:
@@ -999,6 +1732,7 @@ async def _scan_project_impl(
                     "file_path": pf["file_path"],
                     "language": pf["language"],
                     "layer": pf["layer"],
+                    "package": pf.get("package", ""),
                     "classes": pf["classes"],
                     "functions": pf["functions"],
                 },
@@ -1070,86 +1804,6 @@ async def _scan_project_impl(
         ", ".join(f"{k}={v}" for k, v in sorted(layer_file_counts.items())),
     )
 
-    # ── Auto-save architecture rules ─────────────────────────────────────────
-    # Always save AT LEAST one rule regardless of how many layers were found.
-    # Rules are chosen by specificity: full layered > MVC > frontend > script.
-    rules_saved = 0
-
-    async def _try_add_rule(name: str, description: str, severity: str = "error") -> None:
-        nonlocal rules_saved
-        try:
-            await memory_service.add_rule(
-                project_id=project_id,
-                name=name,
-                description=description,
-                severity=severity,
-            )
-            logger.info("Scan [%s]: saved auto-detected rule: %s", project_id, name)
-            rules_saved += 1
-        except Exception:
-            logger.warning(
-                "Scan [%s]: failed to save rule '%s'", project_id, name, exc_info=True
-            )
-
-    if has_controller and has_service and has_repository:
-        # Full layered architecture: Controller → Service → Repository
-        await _try_add_rule(
-            "No direct Controller→Repository calls",
-            "Controllers should not call Repositories directly; "
-            "all data access must go through the Service layer.",
-        )
-        await _try_add_rule(
-            "Business logic in Service layer",
-            "Business logic belongs in Service layer, not Controllers. "
-            "Controllers should only handle request/response translation.",
-        )
-    elif has_controller and has_service:
-        # MVC / two-tier layered
-        await _try_add_rule(
-            "Business logic in Service layer",
-            "Business logic belongs in Service layer, not Controllers. "
-            "Controllers should only handle request/response translation.",
-        )
-    elif has_view and not has_controller and not has_service:
-        # Pure frontend / React / Vue / Svelte project
-        framework_name = stack.get("framework", "the framework")
-        await _try_add_rule(
-            "Components should not contain business logic",
-            f"Keep {framework_name} components focused on rendering. "
-            "Extract business logic and side effects into custom hooks, "
-            "services, or state management modules.",
-            severity="warning",
-        )
-    elif has_controller and not has_service:
-        # Controller-only — thin routing layer or script-style web app
-        await _try_add_rule(
-            "Keep functions under 50 lines",
-            "Route handlers are growing large. Extract logic into dedicated "
-            "service functions to improve testability and readability.",
-            severity="warning",
-        )
-
-    # Fallback: if no rules were saved yet (single-file project, pure scripts,
-    # utilities, or any other project with no clear layering), save generic rules.
-    if rules_saved == 0:
-        # Determine if this looks like a frontend project by framework name
-        fw = stack.get("framework", "unknown")
-        if fw in ("React", "Vue.js", "Angular", "Svelte", "Remix", "Next.js"):
-            await _try_add_rule(
-                "Components should not contain business logic",
-                f"Keep {fw} components focused on rendering. "
-                "Extract business logic and side effects into custom hooks or services.",
-                severity="warning",
-            )
-        else:
-            # Generic script / utility / unknown project
-            await _try_add_rule(
-                "Follow single-responsibility principle",
-                "Each module, class, and function should have exactly one reason "
-                "to change. Keep functions under 50 lines and avoid global state.",
-                severity="warning",
-            )
-
     if arch_type == "unknown" and stack["language"] != "unknown":
         arch_type = stack["language"].lower()
 
@@ -1206,7 +1860,27 @@ async def _scan_project_impl(
         )
         raise
 
+    # ── Post-scan: index documentation files ─────────────────────────────────
+    try:
+        docs_indexed = await _index_docs(project_id, root_path, scan_mode)
+    except Exception:
+        logger.warning("Scan [%s]: doc indexing failed — continuing", project_id, exc_info=True)
+        docs_indexed = 0
+
+    # ── Post-scan: pattern discovery (full scan only) ─────────────────────────
+    if scan_mode == "full" and neo4j_available:
+        try:
+            import asyncio as _asyncio
+            patterns = await _asyncio.wait_for(_discover_patterns(project_id, parsed_files), timeout=30.0)
+            if patterns:
+                await memory_service.save_discovered_patterns(project_id, patterns)
+        except _asyncio.TimeoutError:
+            logger.warning("Scan [%s]: pattern discovery timed out after 30 s — skipping", project_id)
+        except Exception:
+            logger.warning("Scan [%s]: pattern discovery failed — continuing", project_id, exc_info=True)
+
     result = {"files_found": len(source_files), "classes_found": len(all_classes),
-              "functions_found": len(all_functions), "modules": modules}
+              "functions_found": len(all_functions), "modules": modules,
+              "docs_indexed": docs_indexed}
     logger.info("Scan [%s]: completed — %s", project_id, result)
     return result
