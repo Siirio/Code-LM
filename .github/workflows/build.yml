@@ -66,6 +66,8 @@ jobs:
 
       - name: Download and convert embedding model to ONNX
         working-directory: backend
+        env:
+          PYTHONIOENCODING: utf-8
         run: |
           pip install "optimum[onnxruntime]" sentence-transformers
           python scripts/setup_embedding_model.py

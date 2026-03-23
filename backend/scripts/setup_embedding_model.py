@@ -25,7 +25,7 @@ OUT_DIR = Path(__file__).parent.parent / "models" / "all-MiniLM-L6-v2"
 
 
 def main():
-    print(f"[setup] Exporting {MODEL_ID} → ONNX …")
+    print(f"[setup] Exporting {MODEL_ID} -> ONNX ...")
     print(f"[setup] Output: {OUT_DIR}")
 
     # Validate dependencies early with clear messages
