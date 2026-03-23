@@ -8,7 +8,10 @@ pydantic-settings==2.2.1
 pydantic_core==2.18.2
 python-dotenv==1.0.1
 anthropic==0.84.0
-sentence-transformers
+onnxruntime>=1.17.0
+tokenizers>=0.19.0
+# sentence-transformers + optimum are only needed once to run
+# scripts/setup_embedding_model.py — not required at runtime.
 neo4j==5.20.0
 qdrant-client==1.17.1
 numpy

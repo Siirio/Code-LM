@@ -52,12 +52,20 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("All storage backends connected")
 
-    # Pre-warm the embedding model in the background so it is ready before
-    # the first scan.  The download (~90 MB on a cold start) runs in a thread
-    # pool and will not block the server from accepting requests.
+    # Pre-warm the ONNX embedding model in the background.
+    # Loads from local disk only — no network calls, no PyTorch.
+    # If model files are missing the task logs a clear error pointing to the
+    # setup script; the server still starts so other features remain usable.
     async def _prewarm_embeddings():
-        from scanner.project_scanner import _ensure_embedding_model
-        await _ensure_embedding_model()
+        import embedding as _emb
+        try:
+            await _emb.ensure_model()
+        except Exception as exc:
+            logger.error(
+                "Embedding model not ready: %s  "
+                "→ Run:  python backend/scripts/setup_embedding_model.py",
+                exc,
+            )
 
     import asyncio as _asyncio
     _asyncio.create_task(_prewarm_embeddings())

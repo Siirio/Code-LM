@@ -64,6 +64,12 @@ jobs:
         working-directory: backend
         run: pip install -r requirements.txt pyinstaller
 
+      - name: Download and convert embedding model to ONNX
+        working-directory: backend
+        run: |
+          pip install "optimum[onnxruntime]" sentence-transformers
+          python scripts/setup_embedding_model.py
+
       - name: Build PyInstaller binary
         working-directory: backend
         run: pyinstaller backend.spec

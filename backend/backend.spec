@@ -18,6 +18,9 @@ a = Analysis(
         ('storage', 'storage'),
         ('llm', 'llm'),
         ('config.py', '.'),
+        ('embedding.py', '.'),
+        # ONNX model files — generated once by scripts/setup_embedding_model.py
+        ('models', 'models'),
     ],
     hiddenimports=[
         # uvicorn internals (not auto-detected)
@@ -49,7 +52,9 @@ a = Analysis(
         'fastapi.responses',
         # LLM providers
         'anthropic',
-        'sentence_transformers',
+        # Embedding (ONNX runtime — no PyTorch)
+        'onnxruntime',
+        'tokenizers',
         # Storage clients
         'qdrant_client',
         'qdrant_client.async_qdrant_client',
@@ -74,6 +79,7 @@ a = Analysis(
     excludes=[
         'matplotlib', 'pandas', 'PIL', 'tkinter',
         'torch', 'torchvision', 'torchaudio', 'sentence_transformers',
+        'optimum',
         'test', 'tests', 'unittest',
     ],
     win_no_prefer_redirects=False,
