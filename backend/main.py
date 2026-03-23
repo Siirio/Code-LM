@@ -1,4 +1,6 @@
 import logging
+import os
+import sys
 from contextlib import asynccontextmanager
 
 logging.basicConfig(
@@ -9,6 +11,7 @@ logging.basicConfig(
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from config import settings
 from api.routes import router
@@ -86,6 +89,24 @@ async def health():
             "qdrant": "connected" if qdrant_client.is_connected else "unavailable",
         },
     }
+
+
+# ── Serve React frontend ──────────────────────────────────────────────────────
+# Must be mounted AFTER all API routes so /api/v1/* and /health take priority.
+# In a PyInstaller bundle, data files live in sys._MEIPASS.
+# In dev mode, they live next to this file in backend/static/.
+
+def _static_dir() -> str:
+    if getattr(sys, 'frozen', False):
+        return os.path.join(sys._MEIPASS, 'static')
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
+
+_sd = _static_dir()
+if os.path.isdir(_sd):
+    app.mount("/", StaticFiles(directory=_sd, html=True), name="frontend")
+    logger.info("Serving frontend from %s", _sd)
+else:
+    logger.warning("Static dir not found at %s — frontend will not be served", _sd)
 
 
 if __name__ == "__main__":
