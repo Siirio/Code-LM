@@ -61,6 +61,12 @@ a = Analysis(
         'httpx',
         # Windows PTY support
         'winpty',
+        # Scanner sub-modules (static analysis misses dynamically-imported files)
+        'scanner.project_scanner',
+        'scanner.import_resolver',
+        'scanner.validator',
+        'scanner.role_inference',
+        'scanner.java_treesitter',
     ],
     hookspath=[],
     hooksconfig={},
