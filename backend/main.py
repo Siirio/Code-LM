@@ -52,6 +52,16 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("All storage backends connected")
 
+    # Pre-warm the embedding model in the background so it is ready before
+    # the first scan.  The download (~90 MB on a cold start) runs in a thread
+    # pool and will not block the server from accepting requests.
+    async def _prewarm_embeddings():
+        from scanner.project_scanner import _ensure_embedding_model
+        await _ensure_embedding_model()
+
+    import asyncio as _asyncio
+    _asyncio.create_task(_prewarm_embeddings())
+
     yield
 
     # ── Shutdown ─────────────────────────────────────────────────────────────
