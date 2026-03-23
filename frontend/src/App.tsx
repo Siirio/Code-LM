@@ -110,14 +110,14 @@ function loadSettings(): CodeLMSettings {
 }
 
 // Apply scale immediately at module load to avoid layout flash.
-// We target #app-root so xterm canvas is not affected by CSS zoom.
+// We temporarily apply zoom to <html> because #app-root doesn't exist yet.
+// The IDE useEffect moves it to #app-root (and clears html zoom) before the
+// first paint, so xterm is never mounted while html-level zoom is active.
 ;(function applyInitialScale() {
   const s = loadSettings()
   const scale = SCALE_ZOOM[s.uiScale] ?? 1.0
   if (scale !== 1.0) {
-    // #app-root may not exist yet — set a class on <html> as a fallback signal
-    // and let the useEffect in IDE finish the job once React mounts.
-    document.documentElement.dataset.pendingScale = String(scale)
+    document.documentElement.style.zoom = String(scale)
   }
 })()
 
@@ -742,25 +742,29 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const streamCancelRef = useRef<(() => void) | null>(null)
 
-  // Apply settings to CSS
-  // We use transform:scale on the #app-root div instead of document.documentElement.style.zoom
-  // because CSS zoom on <html> breaks xterm.js canvas hit-testing and blurs the canvas buffer.
+  // Tracks current CSS zoom factor for use in resize drag handlers
+  // (those handlers close over an empty dep array so can't read state directly).
+  const uiScaleRef = useRef(SCALE_ZOOM[settings.uiScale] ?? 1.0)
+
+  // Apply UI scale with CSS zoom on #app-root.
+  // CSS zoom (unlike transform:scale) affects actual layout, so elements fill
+  // the viewport correctly at every scale level.
+  // We apply it to #app-root, not <html>, so xterm canvas coordinate mapping
+  // is handled via a counter-zoom wrapper on the terminal (see render below).
   useEffect(() => {
     document.documentElement.style.setProperty('--font-size', `${settings.fontSize}px`)
     const scale = SCALE_ZOOM[settings.uiScale] ?? 1.0
+    uiScaleRef.current = scale
+    // Clear the temporary html-level zoom set by the IIFE before React mounted.
+    document.documentElement.style.zoom = ''
     const root = document.getElementById('app-root')
     if (root) {
-      if (scale === 1.0) {
-        root.style.transform = ''
-        root.style.transformOrigin = ''
-        root.style.width = ''
-        root.style.height = ''
-      } else {
-        root.style.transform = `scale(${scale})`
-        root.style.transformOrigin = 'top left'
-        root.style.width = `${100 / scale}%`
-        root.style.height = `${100 / scale}%`
-      }
+      root.style.zoom = scale === 1.0 ? '' : String(scale)
+      // Clear any legacy transform-based values from older code.
+      root.style.transform = ''
+      root.style.transformOrigin = ''
+      root.style.width = ''
+      root.style.height = ''
     }
     saveSettings(settings)
   }, [settings])
@@ -778,15 +782,21 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   // Resize drag handlers
   useEffect(() => {
     function onMouseMove(e: MouseEvent) {
+      // e.clientX/Y are viewport pixels. Panel widths are CSS pixels inside
+      // the zoomed #app-root, so we divide the delta by the current scale.
+      const s = uiScaleRef.current
       if (isDraggingLeft.current) {
-        setLeftWidth(Math.max(120, Math.min(600, dragStartW.current + e.clientX - dragStartX.current)))
+        const delta = (e.clientX - dragStartX.current) / s
+        setLeftWidth(Math.max(120, Math.min(600, dragStartW.current + delta)))
       }
       if (isDraggingMid.current) {
-        const chatMinPx = Math.floor(window.innerWidth * 0.20)
-        const maxMid = window.innerWidth - leftWidth - chatMinPx - 8 // 8px for 2 dividers
-        setMidWidth(Math.max(200, Math.min(maxMid, dragStartW.current + e.clientX - dragStartX.current)))
+        const chatMinPx = Math.floor(window.innerWidth * 0.20 / s)
+        const maxMid = window.innerWidth / s - leftWidth - chatMinPx - 8
+        const delta = (e.clientX - dragStartX.current) / s
+        setMidWidth(Math.max(200, Math.min(maxMid, dragStartW.current + delta)))
       }
       if (isDraggingTerm.current) {
+        // Terminal uses a counter-zoom wrapper so its logical pixels = viewport pixels.
         setTermHeight(Math.max(100, Math.min(800, dragStartH.current + dragStartY.current - e.clientY)))
       }
     }
@@ -1455,7 +1465,10 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
         </main>
       </div>
 
-      {/* Terminal panel */}
+      {/* Terminal panel — wrapped in counter-zoom so xterm canvas coordinates
+          are unaffected by the parent #app-root CSS zoom.
+          zoom: 1/scale neutralises the parent zoom; terminal's logical pixels
+          then equal viewport pixels, so resize drag math stays simple. */}
       {terminalOpen && (
         <>
           <div
@@ -1468,10 +1481,12 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
               document.body.style.userSelect = 'none'
             }}
           />
-          <TerminalPanel
-            onClose={() => setTerminalOpen(false)}
-            style={{ height: termHeight, flexShrink: 0 }}
-          />
+          <div style={{ zoom: 1 / (SCALE_ZOOM[settings.uiScale] ?? 1.0), flexShrink: 0 }}>
+            <TerminalPanel
+              onClose={() => setTerminalOpen(false)}
+              style={{ height: termHeight }}
+            />
+          </div>
         </>
       )}
 

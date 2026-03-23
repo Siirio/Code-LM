@@ -215,11 +215,12 @@ body {
 .toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 6px 16px;
+  gap: 8px;
+  padding: 0 12px;
   border-bottom: 1px solid var(--border);
   background: var(--bg2);
   min-height: 36px;
+  overflow: hidden;
 }
 
 .toolbar-title {
@@ -227,11 +228,18 @@ body {
   font-weight: 600;
   color: var(--text-dim);
   letter-spacing: 0.5px;
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .toolbar-actions {
   display: flex;
+  align-items: center;
   gap: 4px;
+  flex-shrink: 0;
 }
 
 .toolbar-btn {
@@ -852,7 +860,7 @@ body {
 
 /* ── Changes panel ────────────────────────────────────────────────────────── */
 
-.changes-btn { position: relative; }
+.changes-btn { position: relative; width: auto; padding: 0 8px; font-size: 12px; white-space: nowrap; }
 .changes-badge {
   position: absolute;
   top: -4px;
