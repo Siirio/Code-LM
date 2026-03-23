@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/EngramAI.iml" filepath="$PROJECT_DIR$/.idea/EngramAI.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/CodeLM.iml" filepath="$PROJECT_DIR$/.idea/CodeLM.iml" />
     </modules>
   </component>
 </project>

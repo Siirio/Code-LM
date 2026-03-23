@@ -42,6 +42,57 @@ async def init_postgres() -> None:
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Idempotent column migrations — safe to run on every startup.
+        # create_all above handles fresh installs; these ADD IF NOT EXISTS
+        # handle existing databases that are missing newer columns.
+        migrations = [
+            "ALTER TABLE project_memory ADD COLUMN IF NOT EXISTS discovered_patterns TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE project_memory ADD COLUMN IF NOT EXISTS confidence_level VARCHAR(16) NOT NULL DEFAULT 'medium'",
+            "ALTER TABLE project_memory ADD COLUMN IF NOT EXISTS memory_source VARCHAR(32) NOT NULL DEFAULT 'static_analysis'",
+            # parser_discrepancies is created by create_all on fresh installs;
+            # this block handles existing DBs that pre-date this table.
+            """
+            CREATE TABLE IF NOT EXISTS parser_discrepancies (
+                id VARCHAR(128) PRIMARY KEY,
+                project_id VARCHAR(128) NOT NULL,
+                file_path TEXT NOT NULL,
+                regex_classes TEXT NOT NULL DEFAULT '[]',
+                ts_classes TEXT NOT NULL DEFAULT '[]',
+                regex_count INTEGER NOT NULL DEFAULT 0,
+                ts_count INTEGER NOT NULL DEFAULT 0,
+                confidence VARCHAR(16) NOT NULL,
+                parser_used VARCHAR(32) NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_parser_discrepancies_project_id ON parser_discrepancies (project_id)",
+            "CREATE INDEX IF NOT EXISTS ix_parser_discrepancies_file_path ON parser_discrepancies (file_path)",
+            # Change tracking tables
+            """
+            CREATE TABLE IF NOT EXISTS chat_file_changes (
+                id VARCHAR(128) PRIMARY KEY,
+                session_id VARCHAR(128) NOT NULL,
+                file_path TEXT NOT NULL,
+                action VARCHAR(16) NOT NULL DEFAULT 'update',
+                summary TEXT NOT NULL DEFAULT '',
+                completed BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_chat_file_changes_session_id ON chat_file_changes (session_id)",
+            """
+            CREATE TABLE IF NOT EXISTS chat_todos (
+                id VARCHAR(128) PRIMARY KEY,
+                session_id VARCHAR(128) NOT NULL,
+                text TEXT NOT NULL,
+                completed BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_chat_todos_session_id ON chat_todos (session_id)",
+        ]
+        for ddl in migrations:
+            await conn.exec_driver_sql(ddl)
 
 
 async def close_postgres() -> None:

@@ -10,11 +10,12 @@ from config import settings
 
 # Collection names used across the system
 COLLECTION_FILES = "project_files"
-COLLECTION_FUNCTIONS = "project_functions"
+COLLECTION_FUNCTIONS = "project_functions"  # NOT IMPLEMENTED — collection is created but nothing writes to it
+COLLECTION_DOCS = "project_docs"  # .md and PDF files indexed as full text
 
-# Embedding dimension — matches OpenAI text-embedding-3-small output (1536).
+# Embedding dimension — matches sentence-transformers all-MiniLM-L6-v2 output (384).
 # Changing this requires dropping and recreating Qdrant collections.
-EMBEDDING_DIM = 1536
+EMBEDDING_DIM = 384
 
 
 class QdrantClientWrapper:
@@ -47,7 +48,7 @@ class QdrantClientWrapper:
         if self._client is None:
             raise RuntimeError("Qdrant not connected — call connect() first")
         existing = {c.name for c in (await self._client.get_collections()).collections}
-        for name in (COLLECTION_FILES, COLLECTION_FUNCTIONS):
+        for name in (COLLECTION_FILES, COLLECTION_FUNCTIONS, COLLECTION_DOCS):
             if name in existing:
                 # Verify the stored dimension matches our current EMBEDDING_DIM.
                 info = await self._client.get_collection(collection_name=name)

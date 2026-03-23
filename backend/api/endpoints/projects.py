@@ -8,7 +8,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from orchestrator.orchestrator import clear_tool_cache
 from scanner.project_scanner import scan_project
-from storage.memory_service import get_or_create_project, list_sessions, list_personas
+from storage.memory_service import get_or_create_project, list_sessions, list_personas, reset_project_knowledge
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,7 @@ class ScanResponse(BaseModel):
     files_found: int = 0
     classes_found: int = 0
     functions_found: int = 0
+    docs_indexed: int = 0
     modules: list[str] = []
     message: str = ""
 
@@ -71,6 +72,7 @@ async def scan_project_endpoint(request: ScanRequest):
             files_found=result["files_found"],
             classes_found=result["classes_found"],
             functions_found=result["functions_found"],
+            docs_indexed=result.get("docs_indexed", 0),
             modules=result["modules"],
         )
     except FileNotFoundError:
@@ -78,6 +80,47 @@ async def scan_project_endpoint(request: ScanRequest):
     except Exception:
         logger.exception("Scan failed for project %s", request.project_id)
         raise HTTPException(status_code=500, detail="Scan failed — see server logs")
+
+
+@router.delete("/{project_id}/knowledge")
+async def delete_project_knowledge(project_id: str):
+    """Wipe all stored knowledge for a project so a clean full scan can run.
+
+    Deletes:
+    - All Neo4j nodes/relationships for this project
+    - All Qdrant vectors for this project (files, functions, docs collections)
+    - ProjectMemory and ArchRules rows in PostgreSQL
+    - Resets project.indexed = False
+    """
+    try:
+        from storage.neo4j_client import neo4j_client
+        from storage.qdrant_client import qdrant_client, COLLECTION_FILES, COLLECTION_FUNCTIONS, COLLECTION_DOCS
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+        # 1. Neo4j — delete all nodes for this project
+        await neo4j_client.execute(
+            "MATCH (n {project_id: $pid}) DETACH DELETE n",
+            {"pid": project_id},
+        )
+
+        # 2. Qdrant — delete by project_id filter from all collections
+        pf = Filter(must=[FieldCondition(key="project_id", match=MatchValue(value=project_id))])
+        for collection in (COLLECTION_FILES, COLLECTION_FUNCTIONS, COLLECTION_DOCS):
+            try:
+                await qdrant_client.client.delete(collection_name=collection, points_selector=pf)
+            except Exception:
+                pass  # collection may not exist yet
+
+        # 3. PostgreSQL — reset memory + counters
+        await reset_project_knowledge(project_id)
+
+        # 4. Clear in-memory tool cache
+        clear_tool_cache()
+
+        return {"project_id": project_id, "status": "cleared"}
+    except Exception:
+        logger.exception("Failed to clear knowledge for project %s", project_id)
+        raise HTTPException(status_code=500, detail="Failed to clear project knowledge — see server logs")
 
 
 @router.get("/{project_id}/sessions")

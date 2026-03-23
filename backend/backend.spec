@@ -49,8 +49,7 @@ a = Analysis(
         'fastapi.responses',
         # LLM providers
         'anthropic',
-        'openai',
-        'google.generativeai',
+        'sentence_transformers',
         # Storage clients
         'qdrant_client',
         'qdrant_client.async_qdrant_client',

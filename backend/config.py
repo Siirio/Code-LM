@@ -33,8 +33,6 @@ class Settings(BaseSettings):
 
     # ── LLM API keys (set in .env on the server — users never see these) ──────
     anthropic_api_key: str = ""
-    openai_api_key: str = ""
-    gemini_api_key: str = ""
     llm_provider: str = "anthropic"  # default provider
     llm_model: str = ""              # empty = use provider default
 
@@ -65,6 +63,12 @@ class Settings(BaseSettings):
     qdrant_host: str = "localhost"
     qdrant_port: int = _env_int("CODELM_QDRANT_PORT", 54323)
     qdrant_api_key: str = ""  # empty = no auth (local instance)
+
+    # ── Parser feature flags ────────────────────────────────────────────────────
+    # Set USE_TREE_SITTER_JAVA=true in .env to enable tree-sitter for Java parsing.
+    # Default is False — regex parser is always used, tree-sitter is comparison-only.
+    # When enabling, run a full scan to rebuild the graph with improved accuracy.
+    use_tree_sitter_java: bool = False
 
 
 settings = Settings()

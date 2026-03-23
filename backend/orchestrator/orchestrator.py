@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 # Tools that require deep code analysis — use Sonnet for these rounds
 _CODE_ANALYSIS_TOOLS = frozenset({
-    "query_code_graph", "search_files", "read_file",
+    "query_code_graph", "search_files", "search_docs", "read_file",
     "propose_file_edit", "analyze_impact",
 })
 
@@ -82,9 +82,19 @@ Your behavior:
 - When query_code_graph returns status "no_results": the graph is populated but nothing matched the search term. Do NOT tell the user to rescan. Instead suggest trying a different search term — the message field contains the total node count and a hint.
 - When asked to implement or fix code: always use read_file first to read the current content, then propose changes with propose_file_edit. Never paste raw code blocks as final output for code changes — always use the tool.
 - Available scan modes users can type: /full-scan, /auto-scan <hint>, /package-scan. Mention these when guiding users to scan.
+
+BUSINESS ANALYST MODE — mandatory when explaining any module, feature, or system component:
+- Always lead with WHAT USER PROBLEM IT SOLVES, not with its technical structure. Example: instead of "InvoiceService manages invoice entities and provides CRUD operations", say "InvoiceService lets the business create, track, and bill customers — without it users cannot generate or receive invoices."
+- After the user value statement, describe the technical structure as supporting detail only.
+- When project documentation is indexed (call search_docs first), use it to ground the explanation in the product's own language, not generic engineering terms.
+- discovered_patterns in Project Memory describe real structural behaviour observed in this specific codebase — always mention them when they are relevant to the explanation.
+- Project Memory has a confidence_level field: "medium" = derived from static analysis (regex heuristics, auto-scan) — treat as provisional and verify with code graph or read_file before stating as certain. "high" = manually confirmed by a developer — treat as definitive. "low" = inferred from very few files or unknown stack — explicitly flag as low confidence when presenting. Never present medium/low confidence memory the same way as developer-confirmed facts.
+- If no documentation exists and the code alone is the source, state this explicitly: "No documentation was found — explanation is based on code structure only."
+
 - EFFICIENCY RULES (critical — you are rate-limited):
   * Never call the same tool with the same or equivalent query twice. If you already have a result, use it.
   * Maximum 2 search_files calls per response turn. Pick the most specific query.
+  * Maximum 1 search_docs call per response turn.
   * Maximum 2 query_code_graph calls per response turn.
   * Maximum 3 read_file calls per response turn — only read files you will actually propose changes to.
   * Do not call get_project_memory more than once per conversation.
@@ -113,7 +123,7 @@ Response formatting (output is rendered in a terminal/CLI — not a browser):
 TOOLS = [
     {
         "name": "get_project_memory",
-        "description": "Load the project summary: architecture type, modules, rules, domain entities, and key decisions. Always call this first for any architecture-related question.",
+        "description": "Load the project summary: architecture type, modules, rules, domain entities, discovered structural patterns, and key decisions. Always call this first for any architecture-related question.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -187,6 +197,19 @@ TOOLS = [
                 "file_path": {"type": "string", "description": "Absolute path to the file"}
             },
             "required": ["file_path"]
+        }
+    },
+    {
+        "name": "search_docs",
+        "description": "Search project documentation (README files, .md docs, PDFs) by meaning. Use this when explaining a feature, module, or business concept to find relevant documentation context. Always call this before explaining what a module or feature does to users.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string"},
+                "query": {"type": "string", "description": "What you are looking for in the docs, e.g. 'invoice payment flow', 'authentication design', 'user onboarding'"},
+                "limit": {"type": "integer", "description": "Maximum documents to return (default: 5)", "default": 5}
+            },
+            "required": ["project_id", "query"]
         }
     },
     {
@@ -289,8 +312,8 @@ async def _execute_tool(tool_name: str, tool_input: dict, project_id: str) -> st
             relationships = await neo4j_client.query(dep_cypher, {"project_id": project_id, "query": query_text})
 
         # Compress node records to only essential fields to reduce token usage
-        _KEEP_FIELDS = {"name", "file_path", "layer"}
-        nodes = [{k: v for k, v in n.items() if k in _KEEP_FIELDS} for n in nodes]
+        _KEEP_FIELDS = {"name", "file_path", "layer", "package"}
+        nodes = [{k: v for k, v in n.items() if k in _KEEP_FIELDS and v} for n in nodes]
 
         if not nodes:
             # Distinguish "graph is empty" from "query matched nothing".
@@ -382,6 +405,7 @@ async def _execute_tool(tool_name: str, tool_input: dict, project_id: str) -> st
                     FieldCondition(key="file_path", match=MatchText(text=query_text)),
                     FieldCondition(key="classes", match=MatchText(text=query_text)),
                     FieldCondition(key="functions", match=MatchText(text=query_text)),
+                    FieldCondition(key="package", match=MatchText(text=query_text)),
                 ]
 
             if text_conditions:
@@ -416,19 +440,91 @@ async def _execute_tool(tool_name: str, tool_input: dict, project_id: str) -> st
         files = []
         for point in results:
             p = point.payload or {}
-            files.append({
+            entry = {
                 "file_path": p.get("file_path", ""),
                 "language": p.get("language", ""),
                 "layer": p.get("layer", ""),
                 "classes": p.get("classes", []),
                 "functions": p.get("functions", []),
-            })
+            }
+            if p.get("package"):
+                entry["package"] = p["package"]
+            files.append(entry)
 
         return json.dumps({
             "status": "ok",
             "query": query_text,
             "files": files,
             "message": f"Found {len(files)} file(s) matching '{query_text}'.",
+        })
+
+    elif tool_name == "search_docs":
+        from storage.qdrant_client import qdrant_client, COLLECTION_DOCS
+        from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchText
+
+        query_text = tool_input.get("query", "")
+        limit = int(tool_input.get("limit", 5))
+
+        if not qdrant_client.is_connected:
+            return json.dumps({
+                "status": "unavailable",
+                "docs": [],
+                "message": "Qdrant not connected.",
+            })
+
+        try:
+            probe, _ = await qdrant_client.client.scroll(
+                collection_name=COLLECTION_DOCS,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="project_id", match=MatchValue(value=project_id))]
+                ),
+                limit=1,
+                with_payload=False,
+                with_vectors=False,
+            )
+        except Exception:
+            probe = []
+
+        if not probe:
+            return json.dumps({
+                "status": "no_docs",
+                "docs": [],
+                "message": "No documentation indexed for this project. Run /full-scan to index .md and PDF files.",
+            })
+
+        try:
+            search_filter = Filter(
+                must=[FieldCondition(key="project_id", match=MatchValue(value=project_id))],
+                should=[FieldCondition(key="content", match=MatchText(text=query_text))] if query_text else [],
+            )
+            results, _ = await qdrant_client.client.scroll(
+                collection_name=COLLECTION_DOCS,
+                scroll_filter=search_filter,
+                limit=limit,
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception:
+            logger.warning("search_docs: Qdrant scroll failed", exc_info=True)
+            return json.dumps({"status": "error", "docs": [], "message": "Doc search failed."})
+
+        docs = []
+        for point in results:
+            p = point.payload or {}
+            # Return a snippet of the content to avoid flooding the context window
+            content = p.get("content", "")
+            snippet = content[:2000] + ("…" if len(content) > 2000 else "")
+            docs.append({
+                "file_path": p.get("file_path", ""),
+                "title": p.get("title", ""),
+                "snippet": snippet,
+            })
+
+        return json.dumps({
+            "status": "ok",
+            "query": query_text,
+            "docs": docs,
+            "message": f"Found {len(docs)} document(s) matching '{query_text}'.",
         })
 
     elif tool_name == "suggest_memory_update":
@@ -658,8 +754,6 @@ def _default_model(provider_name: str) -> str:
     """Return the default model name for a given LLM provider."""
     defaults = {
         "anthropic": "claude-sonnet-4-6",
-        "openai": "gpt-4o",
-        "gemini": "gemini-1.5-flash",
     }
     return defaults.get(provider_name.lower().strip(), "claude-sonnet-4-6")
 
@@ -730,8 +824,6 @@ async def chat(
 
         if response.stop_reason == "tool_use":
             # Append assistant turn to history
-            # For Anthropic the raw response content preserves tool_use blocks;
-            # for Gemini we reconstruct a simple text message
             if hasattr(response.raw, "content"):
                 # Convert Pydantic content blocks to plain dicts so they survive
                 # re-serialisation in subsequent API calls without pydantic-core errors.
@@ -1004,6 +1096,13 @@ async def chat_stream(
             # Persist assistant reply to session
             if session_id and collected_text:
                 await save_message(session_id, "assistant", collected_text)
+                try:
+                    from storage.memory_service import add_todos_from_text
+                    todos = await add_todos_from_text(session_id, collected_text)
+                    if todos:
+                        yield _sse({"todos_added": len(todos)})
+                except Exception:
+                    pass
             yield _sse({"done": True})
             return
 
@@ -1016,6 +1115,11 @@ async def chat_stream(
             )
             if session_id and collected_text:
                 await save_message(session_id, "assistant", collected_text)
+                try:
+                    from storage.memory_service import add_todos_from_text
+                    await add_todos_from_text(session_id, collected_text)
+                except Exception:
+                    pass
             yield _sse({"chunk": "\n\n⚠ Reached maximum tool-call depth — partial results shown above."})
             yield _sse({"done": True})
             return

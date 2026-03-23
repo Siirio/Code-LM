@@ -24,12 +24,38 @@ if not _WINDOWS:
 
 
 def _available_shells() -> list[str]:
+    found: list[str] = []
     if _WINDOWS:
-        candidates = ["pwsh", "powershell", "cmd"]
+        # Use 'where' to locate each candidate — more reliable than shutil.which
+        # on Windows for system shells that may not be on PATH as plain names.
+        for candidate in ("powershell.exe", "cmd.exe", "wsl.exe"):
+            try:
+                result = subprocess.run(
+                    ["where", candidate],
+                    capture_output=True, text=True, timeout=3,
+                )
+                if result.returncode == 0:
+                    path = result.stdout.strip().splitlines()[0].strip()
+                    if path:
+                        found.append(path)
+            except Exception:
+                pass
+        return found or ["cmd.exe"]
     else:
-        candidates = ["bash", "zsh", "fish", "sh"]
-    found = [sh for sh in candidates if shutil.which(sh)]
-    return found or (["cmd"] if _WINDOWS else ["sh"])
+        # Use 'which' on Linux/macOS — returns the full absolute path.
+        for candidate in ("bash", "zsh", "sh"):
+            try:
+                result = subprocess.run(
+                    ["which", candidate],
+                    capture_output=True, text=True, timeout=3,
+                )
+                if result.returncode == 0:
+                    path = result.stdout.strip()
+                    if path:
+                        found.append(path)
+            except Exception:
+                pass
+        return found or ["/bin/sh"]
 
 
 def _set_pty_size_unix(fd: int, rows: int, cols: int) -> None:

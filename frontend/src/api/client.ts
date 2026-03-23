@@ -152,6 +152,14 @@ export async function scanProject(params: {
   return res.json()
 }
 
+export async function deleteProjectKnowledge(projectId: string): Promise<void> {
+  const res = await fetch(`${BASE}/projects/${projectId}/knowledge`, { method: 'DELETE' })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new Error(err.detail || res.statusText)
+  }
+}
+
 // ── Sessions ──────────────────────────────────────────────────────────────────
 
 export async function listSessions(projectId: string): Promise<Session[]> {
@@ -241,6 +249,7 @@ export function chatStream(
     onCost: (cost_usd: number, balance_usd: number) => void
     onDone: () => void
     onError: (err: string) => void
+    onTodosAdded?: (count: number) => void
   }
 ): () => void {
   const controller = new AbortController()
@@ -290,6 +299,7 @@ export function chatStream(
               const newBalance = deductCost(event.cost_usd)
               callbacks.onCost(event.cost_usd, newBalance)
             }
+            else if (event.todos_added && callbacks.onTodosAdded) callbacks.onTodosAdded(event.todos_added)
             else if (event.done) callbacks.onDone()
           } catch {
             // skip malformed SSE lines

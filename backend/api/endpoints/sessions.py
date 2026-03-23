@@ -12,6 +12,8 @@ from storage.memory_service import (
     delete_session,
     create_persona,
     list_personas,
+    get_file_changes,
+    get_todos,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,6 +87,24 @@ async def get_messages_endpoint(session_id: str):
         return await get_messages(session_id)
     except HTTPException:
         raise
+    except Exception as exc:
+        raise _db_error(exc)
+
+
+# ── Change tracking endpoints ─────────────────────────────────────────────────
+
+@router.get("/{session_id}/changes")
+async def get_changes_endpoint(session_id: str):
+    try:
+        return await get_file_changes(session_id)
+    except Exception as exc:
+        raise _db_error(exc)
+
+
+@router.get("/{session_id}/todos")
+async def get_todos_endpoint(session_id: str):
+    try:
+        return await get_todos(session_id)
     except Exception as exc:
         raise _db_error(exc)
 

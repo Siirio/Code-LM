@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+    Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -58,6 +58,15 @@ class ProjectMemory(Base):
     # Stored as newline-separated values for simplicity; serialised/deserialised by the service
     modules: Mapped[str] = mapped_column(Text, default="")          # "AuthModule\nBillingModule\n..."
     domain_entities: Mapped[str] = mapped_column(Text, default="")  # "User\nInvoice\nPayment\n..."
+    # JSON-encoded list of pattern strings discovered by the post-scan analysis pass.
+    discovered_patterns: Mapped[str] = mapped_column(Text, default="")
+    # Trustworthiness of this memory entry.
+    # "medium" = derived from static analysis (regex parsers, heuristics).
+    # "high"   = manually confirmed by a developer.
+    # "low"    = inferred from incomplete data (< 5 files, unknown stack, etc.)
+    confidence_level: Mapped[str] = mapped_column(String(16), default="medium")
+    # How this memory was produced.
+    memory_source: Mapped[str] = mapped_column(String(32), default="static_analysis")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
     project: Mapped["Project"] = relationship(back_populates="memory")
@@ -70,6 +79,15 @@ class ProjectMemory(Base):
     def entities_list(self) -> list[str]:
         return [e for e in self.domain_entities.splitlines() if e.strip()]
 
+    def patterns_list(self) -> list[str]:
+        import json as _json
+        if not self.discovered_patterns:
+            return []
+        try:
+            return _json.loads(self.discovered_patterns)
+        except Exception:
+            return []
+
     def to_dict(self) -> dict:
         return {
             "project_id": self.project_id,
@@ -77,6 +95,9 @@ class ProjectMemory(Base):
             "architecture_type": self.architecture_type,
             "modules": self.modules_list(),
             "domain_entities": self.entities_list(),
+            "discovered_patterns": self.patterns_list(),
+            "confidence_level": self.confidence_level,
+            "memory_source": self.memory_source,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
@@ -163,3 +184,69 @@ class AgentPersona(Base):
     description: Mapped[str | None] = mapped_column(String(512), nullable=True)
     system_prompt_extra: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+# ── Change Tracking ───────────────────────────────────────────────────────────
+
+class ChatFileChange(Base):
+    """A file written to disk as a result of an accepted AI proposal in a chat session."""
+    __tablename__ = "chat_file_changes"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True, default=_uuid)
+    session_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    # "create" | "update" | "delete"
+    action: Mapped[str] = mapped_column(String(16), nullable=False, default="update")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    completed: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (Index("ix_chat_file_changes_session_id", "session_id"),)
+
+
+class ChatTodo(Base):
+    """A TODO item extracted from an AI response in a chat session."""
+    __tablename__ = "chat_todos"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True, default=_uuid)
+    session_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (Index("ix_chat_todos_session_id", "session_id"),)
+
+
+# ── Parser Discrepancies ───────────────────────────────────────────────────────
+
+class ParserDiscrepancy(Base):
+    """Records differences between the regex and tree-sitter Java parsers per file.
+
+    Populated when USE_TREE_SITTER_JAVA=True and a project_id is supplied to
+    _parse_java_file().  Used for observability and to evaluate tree-sitter
+    accuracy before promoting it to the sole parser.
+
+    No ForeignKey to projects — project_id is a plain string so that rows can be
+    written even when the project row is not yet committed.
+    """
+    __tablename__ = "parser_discrepancies"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True, default=_uuid)
+    # Not a FK — keeps writes independent of project lifecycle
+    project_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    # JSON arrays, capped at 50 entries each
+    regex_classes: Mapped[str] = mapped_column(Text, default="[]")
+    ts_classes: Mapped[str] = mapped_column(Text, default="[]")
+    regex_count: Mapped[int] = mapped_column(Integer, default=0)
+    ts_count: Mapped[int] = mapped_column(Integer, default=0)
+    # "high" | "medium" | "low"
+    confidence: Mapped[str] = mapped_column(String(16), nullable=False)
+    # "tree-sitter" | "regex"
+    parser_used: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (
+        Index("ix_parser_discrepancies_project_id", "project_id"),
+        Index("ix_parser_discrepancies_file_path", "file_path"),
+    )

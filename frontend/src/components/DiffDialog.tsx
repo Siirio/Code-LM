@@ -6,9 +6,10 @@ interface Props {
   onAccept: () => void
   onAcceptAll: () => void
   onReject: () => void
+  loading?: boolean
 }
 
-export default function DiffDialog({ proposal, onAccept, onAcceptAll, onReject }: Props) {
+export default function DiffDialog({ proposal, onAccept, onAcceptAll, onReject, loading }: Props) {
   const lang = proposal.file_path.endsWith('.py')
     ? 'python'
     : proposal.file_path.endsWith('.java')
@@ -49,9 +50,11 @@ export default function DiffDialog({ proposal, onAccept, onAcceptAll, onReject }
         </div>
 
         <div className="diff-actions">
-          <button className="btn-reject" onClick={onReject}>Reject</button>
-          <button className="btn-accept-all" onClick={onAcceptAll}>Accept All in Chat</button>
-          <button className="btn-accept" onClick={onAccept}>Accept</button>
+          <button className="btn-reject" onClick={onReject} disabled={loading}>Reject</button>
+          <button className="btn-accept-all" onClick={onAcceptAll} disabled={loading}>Accept All in Chat</button>
+          <button className="btn-accept" onClick={onAccept} disabled={loading}>
+            {loading ? 'Applying…' : 'Accept'}
+          </button>
         </div>
       </div>
     </div>

@@ -56,21 +56,59 @@ class ApplyEditRequest(BaseModel):
     description: str = ""
     original_snippet: str = ""
     new_snippet: str
+    session_id: str | None = None
 
 
 @router.post("/apply-edit")
 async def apply_edit(request: ApplyEditRequest):
     """Write an AI-proposed edit to disk after the user accepted it in the IDE."""
-    file_path = _resolve_path(request.file_path)
+    raw_path = request.file_path
+    # file_path is declared here so the except block can always reference it even
+    # if _resolve_path raises before the assignment completes.
+    file_path = raw_path
     try:
-        if not os.path.exists(file_path) and not request.original_snippet:
-            # New file — create parent dirs and write
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        # ── Path diagnostics ─────────────────────────────────────────────────
+        logger.info("apply_edit: received raw_path=%r", raw_path)
+
+        if '\\' in raw_path:
+            logger.warning(
+                "apply_edit: raw_path contains backslashes — likely a Windows path "
+                "sent to a WSL backend. _resolve_path will attempt conversion: %r",
+                raw_path,
+            )
+
+        file_path = _resolve_path(raw_path)
+        logger.info("apply_edit: resolved file_path=%r", file_path)
+
+        parent_dir = os.path.dirname(file_path) or "."
+        parent_exists = os.path.isdir(parent_dir)
+        parent_writable = os.access(parent_dir, os.W_OK) if parent_exists else False
+        file_exists = os.path.isfile(file_path)
+        logger.info(
+            "apply_edit: parent_dir=%r exists=%s writable=%s file_exists=%s",
+            parent_dir, parent_exists, parent_writable, file_exists,
+        )
+
+        if parent_exists and not parent_writable:
+            raise PermissionError(f"No write permission on directory: {parent_dir!r}")
+
+        # ── New file ──────────────────────────────────────────────────────────
+        if not file_exists and not request.original_snippet:
+            os.makedirs(parent_dir, exist_ok=True)
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(request.new_snippet)
             logger.info("apply_edit: created new file %s", file_path)
+            if request.session_id:
+                from storage.memory_service import add_file_change
+                await add_file_change(
+                    session_id=request.session_id,
+                    file_path=file_path,
+                    action="create",
+                    summary=request.description,
+                )
             return {"status": "created", "file_path": file_path}
 
+        # ── Edit existing file ────────────────────────────────────────────────
         with open(file_path, "r", encoding="utf-8", errors="replace") as f:
             current = f.read()
 
@@ -82,20 +120,30 @@ async def apply_edit(request: ApplyEditRequest):
                 )
             updated = current.replace(request.original_snippet, request.new_snippet, 1)
         else:
-            # Append mode — no original to replace
             updated = current.rstrip() + "\n\n" + request.new_snippet + "\n"
 
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(updated)
 
         logger.info("apply_edit: wrote %s (%d chars)", file_path, len(updated))
+        if request.session_id:
+            from storage.memory_service import add_file_change
+            await add_file_change(
+                session_id=request.session_id,
+                file_path=file_path,
+                action="update",
+                summary=request.description,
+            )
         return {"status": "ok", "file_path": file_path}
 
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception("apply_edit: failed for %s", file_path)
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.exception(
+            "apply_edit: FAILED — raw_path=%r resolved=%r error_type=%s error=%s",
+            raw_path, file_path, type(exc).__name__, exc,
+        )
+        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}")
 
 
 _IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico', '.bmp'}

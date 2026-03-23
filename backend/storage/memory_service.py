@@ -3,15 +3,17 @@
 All DB access goes through here — endpoints and the orchestrator never
 touch SQLAlchemy directly.
 """
+import json
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from storage.postgres import get_pg_session
 from storage.models import (
     Project, ProjectMemory, MemoryProposal, ArchRule,
     ChatSession, ChatMessage, AgentPersona,
+    ChatFileChange, ChatTodo,
 )
 
 
@@ -33,6 +35,28 @@ async def get_or_create_project(project_id: str, name: str = "", root_path: str 
             "files_indexed": project.files_indexed,
             "last_scanned_at": project.last_scanned_at.isoformat() if project.last_scanned_at else None,
         }
+
+
+async def reset_project_knowledge(project_id: str) -> None:
+    """Reset a project to the un-indexed state: delete its memory row and
+    clear all counters.  Does NOT delete the project row itself so existing
+    references (sessions, etc.) stay intact."""
+    async with get_pg_session() as session:
+        # Delete ProjectMemory (patterns, summary, rules summary)
+        await session.execute(
+            delete(ProjectMemory).where(ProjectMemory.project_id == project_id)
+        )
+        # Delete all arch rules
+        await session.execute(
+            delete(ArchRule).where(ArchRule.project_id == project_id)
+        )
+        # Reset project counters
+        result = await session.execute(select(Project).where(Project.id == project_id))
+        project = result.scalar_one_or_none()
+        if project:
+            project.indexed = False
+            project.files_indexed = 0
+            project.last_scanned_at = None
 
 
 async def mark_project_scanned(project_id: str, files_count: int) -> None:
@@ -63,6 +87,8 @@ async def save_memory(
     architecture_type: str,
     modules: list[str],
     domain_entities: list[str],
+    confidence_level: str = "medium",
+    memory_source: str = "static_analysis",
 ) -> dict:
     """Create or fully replace the Layer 1 memory for a project."""
     async with get_pg_session() as session:
@@ -77,11 +103,29 @@ async def save_memory(
         mem.architecture_type = architecture_type
         mem.modules = "\n".join(modules)
         mem.domain_entities = "\n".join(domain_entities)
+        mem.confidence_level = confidence_level
+        mem.memory_source = memory_source
         # Flush so SQLAlchemy resolves server-side defaults (updated_at) and
         # assigns the primary key before we serialise the row.  The surrounding
         # get_pg_session context manager will commit after the yield.
         await session.flush()
         return mem.to_dict()
+
+
+async def save_discovered_patterns(project_id: str, patterns: list[str]) -> None:
+    """Persist the post-scan discovered pattern strings for a project.
+
+    Overwrites any previously stored patterns.  Silently no-ops if no
+    ProjectMemory row exists yet (shouldn't happen — save_memory runs first).
+    """
+    async with get_pg_session() as session:
+        result = await session.execute(
+            select(ProjectMemory).where(ProjectMemory.project_id == project_id)
+        )
+        mem = result.scalar_one_or_none()
+        if mem:
+            mem.discovered_patterns = json.dumps(patterns)
+            await session.flush()
 
 
 # ── Memory Proposals ──────────────────────────────────────────────────────────
@@ -204,6 +248,17 @@ async def add_rule(project_id: str, name: str, description: str, severity: str =
         )
         rule = result.scalar_one()
         return {"id": rule.id, "name": rule.name, "description": rule.description, "severity": rule.severity}
+
+
+async def delete_all_rules(project_id: str) -> int:
+    """Delete ALL architecture rules for a project (used during rescan so stale
+    auto-generated rules don't persist forever).  Returns the number deleted."""
+    async with get_pg_session() as session:
+        result = await session.execute(
+            delete(ArchRule).where(ArchRule.project_id == project_id)
+        )
+        await session.flush()
+        return result.rowcount
 
 
 # ── Chat Sessions ─────────────────────────────────────────────────────────────
@@ -398,3 +453,107 @@ async def get_persona(persona_id: str) -> dict | None:
             "system_prompt_extra": p.system_prompt_extra,
             "created_at": p.created_at.isoformat(),
         }
+
+
+# ── Change Tracking ────────────────────────────────────────────────────────────
+
+async def add_file_change(
+    session_id: str,
+    file_path: str,
+    action: str = "update",
+    summary: str = "",
+) -> dict:
+    """Record a file write that occurred during a chat session."""
+    async with get_pg_session() as session:
+        change = ChatFileChange(
+            session_id=session_id,
+            file_path=file_path,
+            action=action,
+            summary=summary,
+        )
+        session.add(change)
+        await session.flush()
+        return {
+            "id": change.id,
+            "session_id": change.session_id,
+            "file_path": change.file_path,
+            "action": change.action,
+            "summary": change.summary,
+            "completed": change.completed,
+            "created_at": change.created_at.isoformat(),
+        }
+
+
+async def get_file_changes(session_id: str) -> list[dict]:
+    """Return all file changes for a chat session, ordered chronologically."""
+    async with get_pg_session() as session:
+        result = await session.execute(
+            select(ChatFileChange)
+            .where(ChatFileChange.session_id == session_id)
+            .order_by(ChatFileChange.created_at)
+        )
+        return [
+            {
+                "id": c.id,
+                "session_id": c.session_id,
+                "file_path": c.file_path,
+                "action": c.action,
+                "summary": c.summary,
+                "completed": c.completed,
+                "created_at": c.created_at.isoformat(),
+            }
+            for c in result.scalars().all()
+        ]
+
+
+async def add_todos_from_text(session_id: str, text: str) -> list[dict]:
+    """Extract TODO-like sentences from AI response text and persist them.
+
+    Scans each line for patterns like 'TODO', 'you need to', 'manually add',
+    etc. Returns the list of inserted todo rows (may be empty).
+    """
+    _TRIGGERS = [
+        "todo", "you need to", "manually add", "don't forget",
+        "make sure to", "remember to", "you should", "you must",
+        "you'll need to", "you will need to",
+    ]
+    saved: list[dict] = []
+    lines = text.splitlines()
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or len(stripped) < 10:
+            continue
+        lower = stripped.lower()
+        if any(trigger in lower for trigger in _TRIGGERS):
+            async with get_pg_session() as db:
+                todo = ChatTodo(session_id=session_id, text=stripped)
+                db.add(todo)
+                await db.flush()
+                saved.append({
+                    "id": todo.id,
+                    "session_id": todo.session_id,
+                    "text": todo.text,
+                    "completed": todo.completed,
+                    "created_at": todo.created_at.isoformat(),
+                })
+    return saved
+
+
+async def get_todos(session_id: str) -> list[dict]:
+    """Return all todos for a chat session, ordered chronologically."""
+    async with get_pg_session() as session:
+        result = await session.execute(
+            select(ChatTodo)
+            .where(ChatTodo.session_id == session_id)
+            .order_by(ChatTodo.created_at)
+        )
+        return [
+            {
+                "id": t.id,
+                "session_id": t.session_id,
+                "text": t.text,
+                "completed": t.completed,
+                "created_at": t.created_at.isoformat(),
+            }
+            for t in result.scalars().all()
+        ]

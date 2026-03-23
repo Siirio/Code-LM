@@ -113,13 +113,20 @@ export default function TerminalPanel({ onClose, style }: Props) {
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(el)
-    requestAnimationFrame(() => fit.fit())
+    // Two-pass fit: RAF handles normal mount, setTimeout handles cases where
+    // the container is still being laid out (e.g. panel resize on first open).
+    requestAnimationFrame(() => {
+      fit.fit()
+      setTimeout(() => fit.fit(), 100)
+      term.focus()
+    })
 
     const ws = new WebSocket(`${wsBase()}/ws?shell=${encodeURIComponent(shell)}`)
     ws.binaryType = 'arraybuffer'
 
     ws.onopen = () => {
       fit.fit()
+      term.focus()
       term.onResize(({ rows, cols }: { rows: number; cols: number }) => {
         if (ws.readyState === WebSocket.OPEN)
           ws.send(JSON.stringify({ type: 'resize', rows, cols }))
@@ -150,7 +157,11 @@ export default function TerminalPanel({ onClose, style }: Props) {
             <div
               key={tab.id}
               className={`terminal-tab${tab.id === activeId ? ' active' : ''}`}
-              onClick={() => setActiveId(tab.id)}
+              onClick={() => {
+                setActiveId(tab.id)
+                // Restore xterm focus after React re-render settles
+                requestAnimationFrame(() => sessions.current.get(tab.id)?.term.focus())
+              }}
             >
               <span className="terminal-tab-label">{tab.label}</span>
               <button
@@ -198,6 +209,8 @@ export default function TerminalPanel({ onClose, style }: Props) {
           <div
             key={tab.id}
             ref={el => mountRef(tab.id, el)}
+            tabIndex={0}
+            onClick={() => sessions.current.get(tab.id)?.term.focus()}
             style={{
               position: 'absolute',
               inset: 0,
