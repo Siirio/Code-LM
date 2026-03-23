@@ -25,49 +25,57 @@ from scanner.role_inference import (
 
 DOC_EXTENSIONS: set[str] = {".md", ".pdf"}
 
-# Module-level singleton — loaded once per process, in a thread so the
-# event loop is never blocked by the ~1 s model load or any network download.
+# Module-level singleton.  Loaded lazily in a background thread on first scan
+# so it never blocks the FastAPI event loop (model load can take 1-60+ s if
+# a download is needed; blocking the loop hangs ALL in-flight requests).
 _embedding_model = None
-# Set to True once we've tried (and failed) to load, so we don't retry.
-_embedding_model_unavailable = False
+_embedding_model_unavailable = False  # True after a failed load — no retries
 
 
-def _get_embedding_model():
-    """Return the cached SentenceTransformer, or None if unavailable.
+def _load_model_sync() -> object | None:
+    """Synchronous model loader — runs in a thread pool, not the event loop."""
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
-    Uses local_files_only=True so the model never tries to download from
-    HuggingFace mid-scan (which would block the thread for minutes on slow
-    connections and hang the FastAPI event loop via run_in_executor).
-    If the model is not cached, returns None immediately.
+
+async def _ensure_embedding_model() -> object | None:
+    """Load the embedding model in a thread pool (non-blocking).
+
+    - If already loaded: returns instantly.
+    - If sentence_transformers is not installed (packaged app): returns None.
+    - If loading hangs (network download): times out after 120 s and returns
+      None so the scan continues with zero vectors instead of hanging forever.
     """
     global _embedding_model, _embedding_model_unavailable
     if _embedding_model_unavailable:
         return None
-    if _embedding_model is None:
-        try:
-            from sentence_transformers import SentenceTransformer
-            # local_files_only=True: raises EnvironmentError immediately if the
-            # model is not in the local HuggingFace cache.  No network I/O.
-            _embedding_model = SentenceTransformer(
-                "all-MiniLM-L6-v2", cache_folder=None, local_files_only=True
-            )
-        except Exception:
-            _embedding_model_unavailable = True
-            return None
+    if _embedding_model is not None:
+        return _embedding_model
+    try:
+        _embedding_model = await asyncio.wait_for(
+            asyncio.to_thread(_load_model_sync),
+            timeout=120,
+        )
+        logger.info("Embedding model loaded — semantic search enabled")
+    except asyncio.TimeoutError:
+        _embedding_model_unavailable = True
+        logger.warning(
+            "Embedding model load timed out (120 s) — semantic search disabled. "
+            "Pre-download with: python -c \"from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')\""
+        )
+    except Exception as exc:
+        _embedding_model_unavailable = True
+        logger.info("Embedding model unavailable (%s) — semantic search disabled", exc)
     return _embedding_model
 
 
 def _generate_embedding(class_names: list[str], file_path: str, layer: str, methods: list[str]) -> list[float]:
-    """Generate a 384-dim embedding using sentence-transformers all-MiniLM-L6-v2.
-    Runs locally — no API key or external service required.
-    Falls back to a zero vector if the model is not cached locally.
-    """
+    """Generate a 384-dim embedding. Returns a zero vector if model not loaded."""
+    if _embedding_model is None:
+        return [0.0] * EMBEDDING_DIM
     text = f"{' '.join(class_names)} {file_path} {layer} {' '.join(methods)}"
     try:
-        model = _get_embedding_model()
-        if model is None:
-            return [0.0] * EMBEDDING_DIM
-        vector = model.encode(text, normalize_embeddings=True)
+        vector = _embedding_model.encode(text, normalize_embeddings=True)
         return vector.tolist()
     except Exception as e:
         logger.warning("Embedding generation failed: %s — using zero vector", e)
@@ -1575,6 +1583,11 @@ async def _scan_project_impl(
     qdrant_available = qdrant_client.is_connected
     if not qdrant_available:
         logger.warning("Scan [%s]: Qdrant not connected — skipping file index writes", project_id)
+
+    # Load embedding model now (non-blocking, up to 120 s timeout).
+    # Must happen before the Qdrant indexing loop that calls _generate_embedding.
+    if qdrant_available:
+        await _ensure_embedding_model()
 
     all_classes, all_functions = [], []
     # Accumulate per-file parsed data for Qdrant indexing
