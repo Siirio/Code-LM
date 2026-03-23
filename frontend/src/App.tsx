@@ -1090,7 +1090,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
 
     // Slash command handling
     if (msg.startsWith('/full-scan')) {
-      addSystem('Starting full scan...')
+      addSystem('Running full scan...')
       await runScan('full')
       const rest = msg.replace('/full-scan', '').trim()
       if (rest) { setInput(rest); setTimeout(send, 100) }
@@ -1465,10 +1465,9 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
         </main>
       </div>
 
-      {/* Terminal panel — wrapped in counter-zoom so xterm canvas coordinates
-          are unaffected by the parent #app-root CSS zoom.
-          zoom: 1/scale neutralises the parent zoom; terminal's logical pixels
-          then equal viewport pixels, so resize drag math stays simple. */}
+      {/* Terminal panel — no zoom wrapper needed because Electron/Chromium's
+          layout engine handles offsetWidth/Height correctly for CSS zoom
+          (unlike transform:scale which breaks xterm coordinate math). */}
       {terminalOpen && (
         <>
           <div
@@ -1481,12 +1480,10 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
               document.body.style.userSelect = 'none'
             }}
           />
-          <div style={{ zoom: 1 / (SCALE_ZOOM[settings.uiScale] ?? 1.0), flexShrink: 0 }}>
-            <TerminalPanel
-              onClose={() => setTerminalOpen(false)}
-              style={{ height: termHeight }}
-            />
-          </div>
+          <TerminalPanel
+            onClose={() => setTerminalOpen(false)}
+            style={{ height: termHeight }}
+          />
         </>
       )}
 

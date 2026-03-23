@@ -87,29 +87,34 @@ async def delete_project_knowledge(project_id: str):
     """Wipe all stored knowledge for a project so a clean full scan can run.
 
     Deletes:
-    - All Neo4j nodes/relationships for this project
-    - All Qdrant vectors for this project (files, functions, docs collections)
+    - All Neo4j nodes/relationships for this project (skipped if Neo4j unavailable)
+    - All Qdrant vectors for this project (skipped if Qdrant unavailable)
     - ProjectMemory and ArchRules rows in PostgreSQL
     - Resets project.indexed = False
     """
     try:
         from storage.neo4j_client import neo4j_client
         from storage.qdrant_client import qdrant_client, COLLECTION_FILES, COLLECTION_FUNCTIONS, COLLECTION_DOCS
-        from qdrant_client.models import Filter, FieldCondition, MatchValue
 
-        # 1. Neo4j — delete all nodes for this project
-        await neo4j_client.execute(
-            "MATCH (n {project_id: $pid}) DETACH DELETE n",
-            {"pid": project_id},
-        )
-
-        # 2. Qdrant — delete by project_id filter from all collections
-        pf = Filter(must=[FieldCondition(key="project_id", match=MatchValue(value=project_id))])
-        for collection in (COLLECTION_FILES, COLLECTION_FUNCTIONS, COLLECTION_DOCS):
+        # 1. Neo4j — only when connected
+        if neo4j_client.is_connected:
             try:
-                await qdrant_client.client.delete(collection_name=collection, points_selector=pf)
+                await neo4j_client.execute(
+                    "MATCH (n {project_id: $pid}) DETACH DELETE n",
+                    {"pid": project_id},
+                )
             except Exception:
-                pass  # collection may not exist yet
+                logger.warning("Neo4j delete failed for project %s — continuing", project_id, exc_info=True)
+
+        # 2. Qdrant — only when connected
+        if qdrant_client.is_connected:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            pf = Filter(must=[FieldCondition(key="project_id", match=MatchValue(value=project_id))])
+            for collection in (COLLECTION_FILES, COLLECTION_FUNCTIONS, COLLECTION_DOCS):
+                try:
+                    await qdrant_client.client.delete(collection_name=collection, points_selector=pf)
+                except Exception:
+                    pass  # collection may not exist yet
 
         # 3. PostgreSQL — reset memory + counters
         await reset_project_knowledge(project_id)

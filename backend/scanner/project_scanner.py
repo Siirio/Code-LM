@@ -25,30 +25,52 @@ from scanner.role_inference import (
 
 DOC_EXTENSIONS: set[str] = {".md", ".pdf"}
 
-# Module-level singleton — loading the model once takes ~1 s; subsequent calls are fast.
+# Module-level singleton — loaded once per process, in a thread so the
+# event loop is never blocked by the ~1 s model load or any network download.
 _embedding_model = None
+# Set to True once we've tried (and failed) to load, so we don't retry.
+_embedding_model_unavailable = False
 
 
 def _get_embedding_model():
-    global _embedding_model
+    """Return the cached SentenceTransformer, or None if unavailable.
+
+    Uses local_files_only=True so the model never tries to download from
+    HuggingFace mid-scan (which would block the thread for minutes on slow
+    connections and hang the FastAPI event loop via run_in_executor).
+    If the model is not cached, returns None immediately.
+    """
+    global _embedding_model, _embedding_model_unavailable
+    if _embedding_model_unavailable:
+        return None
     if _embedding_model is None:
-        from sentence_transformers import SentenceTransformer
-        _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+        try:
+            from sentence_transformers import SentenceTransformer
+            # local_files_only=True: raises EnvironmentError immediately if the
+            # model is not in the local HuggingFace cache.  No network I/O.
+            _embedding_model = SentenceTransformer(
+                "all-MiniLM-L6-v2", cache_folder=None, local_files_only=True
+            )
+        except Exception:
+            _embedding_model_unavailable = True
+            return None
     return _embedding_model
 
 
 def _generate_embedding(class_names: list[str], file_path: str, layer: str, methods: list[str]) -> list[float]:
     """Generate a 384-dim embedding using sentence-transformers all-MiniLM-L6-v2.
     Runs locally — no API key or external service required.
+    Falls back to a zero vector if the model is not cached locally.
     """
     text = f"{' '.join(class_names)} {file_path} {layer} {' '.join(methods)}"
     try:
         model = _get_embedding_model()
+        if model is None:
+            return [0.0] * EMBEDDING_DIM
         vector = model.encode(text, normalize_embeddings=True)
         return vector.tolist()
     except Exception as e:
         logger.warning("Embedding generation failed: %s — using zero vector", e)
-        from storage.qdrant_client import EMBEDDING_DIM
         return [0.0] * EMBEDDING_DIM
 
 logger = logging.getLogger(__name__)
@@ -1564,6 +1586,9 @@ async def _scan_project_impl(
         ext = Path(fpath).suffix
         if i % 50 == 0:
             logger.info("Scan [%s]: parsing file %d/%d", project_id, i + 1, len(source_files))
+            # Yield the event loop every 50 files so the server stays responsive
+            # during large scans (file parsing is synchronous/CPU-bound).
+            await asyncio.sleep(0)
         try:
             if ext == ".py":
                 parsed = _parse_python_file(fpath)

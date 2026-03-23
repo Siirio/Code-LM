@@ -39,8 +39,12 @@ export default function TerminalPanel({ onClose, style }: Props) {
 
   const sessions = useRef<Map<string, Session>>(new Map())
   const pendingMount = useRef<Map<string, string>>(new Map())
+  // Guard against React StrictMode double-invoking the init effect
+  const initDone = useRef(false)
 
   useEffect(() => {
+    if (initDone.current) return
+    initDone.current = true
     fetch('/api/v1/terminal/shells')
       .then(r => r.json())
       .then(d => {
