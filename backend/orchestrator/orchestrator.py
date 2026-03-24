@@ -75,35 +75,39 @@ Your responsibilities:
 Your behavior:
 - Think like a senior software architect, not just a code generator
 - Every suggestion is a proposal — you never make automatic changes
-- Be concise but precise. Cite file paths and class names when relevant.
+- Be concise and direct. Cite file paths and class names when relevant.
 - If project has not been scanned yet, guide the user to run a project scan first.
-- Never use hedging language. Forbidden words and phrases: "presumably", "probably", "likely", "seems to be", "might be", "предположительно", "вероятно", "похоже", or any equivalent. If the data says X, state X as fact. If the data does not say X, state clearly what IS known and what IS NOT known yet. Distinguish explicitly between: (a) data was retrieved and is definitive, (b) data was not retrieved — name exactly which tool returned empty or nothing and state what that means.
+- Never use hedging language. Forbidden words and phrases: "presumably", "probably", "likely", "seems to be", "might be", "предположительно", "вероятно", "похоже", or any equivalent. If the data says X, state X as fact. If the data does not say X, state clearly what IS known and what IS NOT known yet.
 - When query_code_graph returns status "empty_graph": the graph has 0 nodes. Tell the user the graph is empty and they should run /full-scan. Do not speculate about why.
-- When query_code_graph returns status "no_results": the graph is populated but nothing matched the search term. Do NOT tell the user to rescan. Instead suggest trying a different search term — the message field contains the total node count and a hint.
+- When query_code_graph returns status "no_results" or "no_exact_match": the graph is populated but nothing matched exactly. The response includes a sample of graph nodes — use those to answer. Do NOT tell the user to rescan.
 - When asked to implement or fix code: always use read_file first to read the current content, then propose changes with propose_file_edit. Never paste raw code blocks as final output for code changes — always use the tool.
 - Available scan modes users can type: /full-scan, /auto-scan <hint>, /package-scan. Mention these when guiding users to scan.
 
-BUSINESS ANALYST MODE — mandatory when explaining any module, feature, or system component:
-- Always lead with WHAT USER PROBLEM IT SOLVES, not with its technical structure. Example: instead of "InvoiceService manages invoice entities and provides CRUD operations", say "InvoiceService lets the business create, track, and bill customers — without it users cannot generate or receive invoices."
-- After the user value statement, describe the technical structure as supporting detail only.
-- When project documentation is indexed (call search_docs first), use it to ground the explanation in the product's own language, not generic engineering terms.
-- discovered_patterns in Project Memory describe real structural behaviour observed in this specific codebase — always mention them when they are relevant to the explanation.
-- Project Memory has a confidence_level field: "medium" = derived from static analysis (regex heuristics, auto-scan) — treat as provisional and verify with code graph or read_file before stating as certain. "high" = manually confirmed by a developer — treat as definitive. "low" = inferred from very few files or unknown stack — explicitly flag as low confidence when presenting. Never present medium/low confidence memory the same way as developer-confirmed facts.
-- If no documentation exists and the code alone is the source, state this explicitly: "No documentation was found — explanation is based on code structure only."
+RESPONSE STYLE (mandatory):
+- Answer the specific question asked. Do not volunteer architecture explanations the user didn't request.
+- If you found the data: present it directly. No preamble like "based on static analysis" or confidence disclaimers unless the data is genuinely uncertain.
+- If you could NOT find the data: say so in one sentence, explain what you tried, and suggest a concrete next step (e.g., "I couldn't find that class in the graph. Try running /full-scan to re-index, or give me the file path and I'll read it directly.").
+- Never pad a response with tangentially related information to compensate for missing data. A short, honest answer is better than a long padded one.
+- When listing classes, entities, or files: just list them. Don't add percentage breakdowns, import statistics, or layer diagrams unless the user asked for analysis.
+- When the user asks "how many X": give the number and the names. Not a textbook explanation of what X is.
+- Do not use phrases like "confidence level for this data: medium" or "from static analysis" — these are internal implementation details.
 
-- EFFICIENCY RULES (critical — you are rate-limited):
-  * Never call the same tool with the same or equivalent query twice. If you already have a result, use it.
-  * Maximum 2 search_files calls per response turn. Pick the most specific query.
-  * Maximum 1 search_docs call per response turn.
-  * Maximum 2 query_code_graph calls per response turn.
-  * Maximum 3 read_file calls per response turn — only read files you will actually propose changes to.
-  * Do not call get_project_memory more than once per conversation.
-  * Aim to answer in 3 tool-call rounds or fewer. If you have enough information, stop calling tools and respond.
+When explaining a module or feature: lead with what user problem it solves, then the technical structure as supporting detail. Only do this when the user is explicitly asking for an explanation — not on every response.
+
+EFFICIENCY RULES (critical — you are rate-limited):
+- Never call the same tool with the same or equivalent query twice. If you already have a result, use it.
+- Maximum 2 search_files calls per response turn. Pick the most specific query.
+- Maximum 1 search_docs call per response turn.
+- Maximum 2 query_code_graph calls per response turn.
+- Maximum 3 read_file calls per response turn — only read files you will actually propose changes to.
+- Maximum 3 search_text calls per response turn.
+- Do not call get_project_memory more than once per conversation.
+- Aim to answer in 3 tool-call rounds or fewer. If you have enough information, stop calling tools and respond.
 
 GROUNDING RULES (anti-hallucination — mandatory):
 - Use ONLY class names, method names, file paths, and architecture that appear in tool results or user-provided context. Never invent them.
 - If a class, file, or pattern is NOT present in the retrieved context — say explicitly: "This was not found in the scanned code."
-- Do NOT assume framework conventions (e.g. "in Spring Boot you usually...") unless that convention is visible in the actual code.
+- Do NOT assume framework conventions unless that convention is visible in the actual code.
 - Do NOT say "typically", "usually", "in most projects", "the standard approach is". You are working with THIS project only.
 - If the request cannot be completed with available context, state exactly what is missing and which tool would retrieve it.
 - When reporting violations or architecture issues: always cite the exact file path, class name, and line number from tool results. If you don't have line numbers, say so.
@@ -114,10 +118,8 @@ Response formatting (output is rendered in a terminal/CLI — not a browser):
 - Keep paragraphs short (1-3 sentences)
 - Use bullet lists for structured data
 - Avoid dense markdown tables
-- When explaining a project, use this section order: Project Overview, Current Limitations, Architecture/Structure, Key Statistics, Recommended Next Steps, What the User Can Ask Next
 - Never produce large compact markdown blocks that are hard to read in terminals
-- Separate logical sections with clear headers and blank lines between them
-- Keep explanations concise and structured"""
+- Separate logical sections with clear headers and blank lines between them"""
 
 # Tools the AI can call (defined as Anthropic tool schemas)
 TOOLS = [
@@ -226,6 +228,29 @@ TOOLS = [
             },
             "required": ["file_path", "description", "new_snippet"]
         }
+    },
+    {
+        "name": "search_text",
+        "description": "Fast exact text search across all project files using ripgrep. Use this to find specific references, imports, usages of a class/function/variable name, or any literal string pattern. Returns matching lines with file paths and line numbers. Faster and more precise than semantic search for exact matches.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Text pattern to search for (literal string or regex)"
+                },
+                "file_glob": {
+                    "type": "string",
+                    "description": "Optional file pattern filter, e.g. '*.java', '*.ts'. Omit to search all files."
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of matching lines to return. Default 30.",
+                    "default": 30
+                }
+            },
+            "required": ["pattern"]
+        }
     }
 ]
 
@@ -317,12 +342,11 @@ async def _execute_tool(tool_name: str, tool_input: dict, project_id: str) -> st
             relationships = await neo4j_client.query(dep_cypher, {"project_id": project_id, "query": query_text})
 
         # Compress node records to only essential fields to reduce token usage
-        _KEEP_FIELDS = {"name", "file_path", "layer", "package"}
+        _KEEP_FIELDS = {"name", "file_path", "layer", "package", "declared_role"}
         nodes = [{k: v for k, v in n.items() if k in _KEEP_FIELDS and v} for n in nodes]
 
         if not nodes:
             # Distinguish "graph is empty" from "query matched nothing".
-            # Only run the count query when we actually got 0 results.
             count_result = await neo4j_client.query(
                 "MATCH (n) WHERE n.project_id = $project_id RETURN count(n) AS total",
                 {"project_id": project_id},
@@ -335,19 +359,35 @@ async def _execute_tool(tool_name: str, tool_input: dict, project_id: str) -> st
                     "nodes": [],
                     "relationships": [],
                     "total_graph_nodes": 0,
-                    "message": f"Graph is empty for this project. Run /full-scan to index it.",
+                    "message": "Graph is empty for this project. Run /full-scan to index it.",
                 })
+            # Fallback: return a sample of nodes so the AI always has something
+            # concrete to work with instead of an empty result.
+            sample_nodes = await neo4j_client.query(
+                "MATCH (n) WHERE n.project_id = $project_id "
+                "RETURN n.name AS name, n.declared_role AS declared_role, "
+                "n.layer AS layer, n.file_path AS file_path "
+                "LIMIT 30",
+                {"project_id": project_id},
+            )
+            sample_nodes = [
+                {k: v for k, v in n.items() if k in _KEEP_FIELDS and v}
+                for n in sample_nodes
+            ]
             return json.dumps({
-                "status": "no_results",
+                "status": "no_exact_match",
                 "query": query_text,
-                "nodes": [],
+                "nodes": sample_nodes,
                 "relationships": [],
                 "total_graph_nodes": total_graph_nodes,
                 "message": (
-                    f"No nodes matched '{query_text}'. "
-                    f"The graph has {total_graph_nodes} indexed nodes — "
-                    f"try a different term (partial name, file name, or module name)."
+                    f"No nodes matched '{query_text}' exactly. "
+                    f"Showing a sample of {len(sample_nodes)} nodes from the graph "
+                    f"(total: {total_graph_nodes}). "
+                    f"Try a different term (partial name, file name, or layer/role name) "
+                    f"to find specific classes."
                 ),
+                "query_executed": "fallback sample — no exact match found",
             })
 
         return json.dumps({
@@ -646,10 +686,252 @@ async def _execute_tool(tool_name: str, tool_input: dict, project_id: str) -> st
             "new_snippet": tool_input.get("new_snippet", ""),
         })
 
+    elif tool_name == "search_text":
+        import shutil
+        import subprocess
+        from scanner.project_scanner import _resolve_path, ROOT_SKIP_DIRS, ALWAYS_SKIP_DIRS
+        from storage.memory_service import get_project
+
+        pattern = tool_input.get("pattern", "")
+        file_glob = tool_input.get("file_glob", "")
+        max_results = int(tool_input.get("max_results", 30))
+
+        if not pattern:
+            return json.dumps({"status": "error", "message": "pattern is required"})
+
+        rg_path = shutil.which("rg")
+        if not rg_path:
+            return json.dumps({
+                "status": "unavailable",
+                "results": [],
+                "message": "ripgrep (rg) is not installed. Install with: apt-get install ripgrep",
+            })
+
+        project_info = await get_project(project_id)
+        if not project_info or not project_info.get("root_path"):
+            return json.dumps({
+                "status": "error",
+                "results": [],
+                "message": "Project root path not found. Run a project scan first.",
+            })
+
+        project_root = _resolve_path(project_info["root_path"])
+
+        cmd = [rg_path, "--json", f"--max-count={max_results}"]
+        skip_dirs = ALWAYS_SKIP_DIRS | ROOT_SKIP_DIRS
+        for skip in sorted(skip_dirs):
+            cmd.extend(["--glob", f"!{skip}"])
+        if file_glob:
+            cmd.extend(["--glob", file_glob])
+        cmd.append(pattern)
+        cmd.append(project_root)
+
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            return json.dumps({"status": "error", "results": [], "message": "Search timed out after 30 seconds"})
+        except Exception as exc:
+            return json.dumps({"status": "error", "results": [], "message": str(exc)})
+
+        results: list[dict] = []
+        for line in proc.stdout.splitlines():
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except Exception:
+                continue
+            if entry.get("type") == "match":
+                data = entry.get("data", {})
+                fp = data.get("path", {}).get("text", "")
+                ln = data.get("line_number", 0)
+                content = data.get("lines", {}).get("text", "").rstrip()
+                if fp and content:
+                    results.append({"file": fp, "line": ln, "content": content})
+            if len(results) >= max_results:
+                break
+
+        return json.dumps({
+            "status": "ok",
+            "pattern": pattern,
+            "results": results,
+            "message": f"Found {len(results)} matching line(s) for '{pattern}'.",
+        })
+
     return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
 
 # ── Sub-agent system prompt extensions ────────────────────────────────────────
+
+# ── Context pre-loading helpers ───────────────────────────────────────────────
+
+_CODE_GEN_WORDS: frozenset[str] = frozenset({
+    "add", "create", "implement", "write", "build", "generate", "new", "make",
+})
+_CODE_TYPE_WORDS: frozenset[str] = frozenset({
+    "controller", "service", "endpoint", "test", "repository",
+})
+_DEBUG_WORDS: frozenset[str] = frozenset({
+    "fix", "bug", "error", "broken", "failing", "crash", "exception", "traceback",
+    "issue", "wrong", "incorrect",
+})
+_LAYER_FROM_TYPE_WORD: dict[str, str] = {
+    "controller": "Controller",
+    "service":    "Service",
+    "repository": "Repository",
+    "endpoint":   "Controller",
+    "test":       "Util",
+}
+
+
+def _parse_class_registry(domain_entities: list[str]) -> dict[str, str]:
+    """Parse the grouped domain_entities format into {class_name: group_name}.
+
+    Handles both new grouped format ("controllers: A, B") and legacy
+    per-entry format ("A (Controller)").
+    """
+    class_to_group: dict[str, str] = {}
+    for line in domain_entities:
+        line = line.strip()
+        if not line:
+            continue
+        if ":" in line:
+            # New grouped format: "controllers: OrderController, ProductController"
+            group, _, names_str = line.partition(":")
+            group = group.strip()
+            for name in names_str.split(","):
+                name = name.strip()
+                if name:
+                    class_to_group[name] = group
+        elif "(" in line and ")" in line:
+            # Legacy format: "OrderController (Controller)"
+            import re as _re
+            m = _re.match(r"^(\w+)\s+\((\w+)\)$", line)
+            if m:
+                class_to_group[m.group(1)] = m.group(2).lower() + "s"
+    return class_to_group
+
+
+async def _build_preload_context(
+    message: str,
+    memory_json: str,
+    project_id: str,
+    agent: str = "main",
+) -> str | None:
+    """Build a deterministic pre-load context block to inject before first LLM call.
+
+    Returns a formatted string or None if nothing useful was found.
+    Runs only Neo4j + memory reads — no file reads, no AI calls.
+    """
+    from storage.neo4j_client import neo4j_client as _neo4j
+
+    try:
+        memory_data = json.loads(memory_json)
+    except Exception:
+        return None
+
+    mem = memory_data.get("memory")
+    if not mem:
+        return None
+
+    domain_entities: list[str] = mem.get("domain_entities", [])
+    class_to_group = _parse_class_registry(domain_entities)
+
+    if not class_to_group and not mem.get("summary"):
+        return None
+
+    message_lower = message.lower()
+    words = set(message_lower.split())
+
+    # Intent detection
+    is_code_gen = bool(words & _CODE_GEN_WORDS) and bool(words & _CODE_TYPE_WORDS)
+    is_debug = bool(words & _DEBUG_WORDS)
+
+    # Keyword-triggered: find class names mentioned in the message (cap at 5)
+    matched_classes: list[str] = []
+    for cls_name in class_to_group:
+        if cls_name.lower() in message_lower:
+            matched_classes.append(cls_name)
+        if len(matched_classes) >= 5:
+            break
+
+    # Build graph context if Neo4j available
+    graph_lines: list[str] = []
+    if _neo4j.is_connected and matched_classes:
+        for cls_name in matched_classes:
+            try:
+                rows = await _neo4j.query(
+                    """
+                    MATCH (c:Class {name: $name, project_id: $project_id})
+                    OPTIONAL MATCH (c)-[:IMPORTS]->(dep:Class {project_id: $project_id})
+                    OPTIONAL MATCH (imp:Class {project_id: $project_id})-[:IMPORTS]->(c)
+                    RETURN c.name AS name, c.file_path AS file_path, c.layer AS layer,
+                           collect(DISTINCT dep.name)[..5] AS imports,
+                           collect(DISTINCT imp.name)[..5] AS imported_by
+                    LIMIT 1
+                    """,
+                    {"name": cls_name, "project_id": project_id},
+                )
+                if rows:
+                    r = rows[0]
+                    role = class_to_group.get(cls_name, r.get("layer", "?"))
+                    parts = [f"- {cls_name} ({role}) — {r.get('file_path', '?')}"]
+                    imp_list = [x for x in (r.get("imports") or []) if x]
+                    imp_by = [x for x in (r.get("imported_by") or []) if x]
+                    if imp_list:
+                        parts.append(f"  Imports: {', '.join(imp_list)}")
+                    if imp_by:
+                        parts.append(f"  Imported by: {', '.join(imp_by)}")
+                    graph_lines.append("\n".join(parts))
+            except Exception:
+                pass
+
+    elif _neo4j.is_connected and is_code_gen and not matched_classes:
+        # Load existing classes of the target type as a reference
+        target_layer = next(
+            (_LAYER_FROM_TYPE_WORD[w] for w in words if w in _LAYER_FROM_TYPE_WORD),
+            None,
+        )
+        if target_layer:
+            try:
+                existing = await _neo4j.query(
+                    "MATCH (n:Class) WHERE n.project_id = $project_id AND n.layer = $layer "
+                    "RETURN n.name AS name, n.file_path AS file_path LIMIT 8",
+                    {"project_id": project_id, "layer": target_layer},
+                )
+                if existing:
+                    graph_lines.append(f"Existing {target_layer} classes:")
+                    for r in existing:
+                        graph_lines.append(f"  - {r['name']} — {r.get('file_path', '?')}")
+            except Exception:
+                pass
+
+    # Only inject when graph lines or debug mode provides useful context
+    if not graph_lines and not is_debug:
+        return None
+
+    lines = ["[Pre-loaded Context]"]
+    summary = mem.get("summary", "")
+    if summary:
+        # Extract first sentence of summary as project headline
+        first_sentence = summary.split(".")[0] + "." if "." in summary else summary
+        lines.append(first_sentence)
+
+    if graph_lines:
+        lines.append("\nRelevant to your request:")
+        lines.extend(graph_lines)
+    elif is_debug:
+        # For debug requests without matched classes, add class registry summary
+        group_counts = {}
+        for grp in class_to_group.values():
+            group_counts[grp] = group_counts.get(grp, 0) + 1
+        if group_counts:
+            counts_str = ", ".join(f"{v} {k}" for k, v in sorted(group_counts.items()))
+            lines.append(f"\nClass registry: {counts_str}")
+
+    lines.append("[End Pre-loaded Context]")
+    return "\n".join(lines)
+
 
 _DEBUGGER_PROMPT = """
 You are acting as the Debugger Agent for this request.
@@ -992,11 +1274,33 @@ async def chat_stream(
         "content": [{"type": "tool_use", "id": _pre_id, "name": "get_project_memory",
                      "input": {"project_id": project_id}}],
     })
-    messages.append({
-        "role": "user",
-        "content": [{"type": "tool_result", "tool_use_id": _pre_id,
-                     "content": pre_memory_content}],
-    })
+
+    # ── Lightweight context pre-loading ──────────────────────────────────────
+    # Build deterministic context (class neighborhoods, type listings) based on
+    # what the user is asking about.  Runs BEFORE the first LLM call to reduce
+    # the number of "exploration" tool rounds.  Falls back gracefully if Neo4j
+    # is unavailable.
+    preload_block: str | None = None
+    try:
+        preload_block = await _build_preload_context(
+            message, pre_memory_result, project_id, detected_agent
+        )
+    except Exception:
+        logger.debug("chat_stream [%s]: preload context failed — skipping", project_id, exc_info=True)
+
+    # Build the user tool-result message; optionally append pre-loaded context
+    # as a separate text block (cache_control: ephemeral for stable sessions).
+    user_tool_result_content: list[dict] = [
+        {"type": "tool_result", "tool_use_id": _pre_id, "content": pre_memory_content}
+    ]
+    if preload_block:
+        user_tool_result_content.append({
+            "type": "text",
+            "text": preload_block,
+            "cache_control": {"type": "ephemeral"},
+        })
+
+    messages.append({"role": "user", "content": user_tool_result_content})
 
     while True:
         # Reduce max_tokens when balance is exhausted to encourage a quick finish
@@ -1113,10 +1417,11 @@ async def chat_stream(
 
         # Hard limit: stop tool loop to prevent runaway API usage
         tool_round += 1
-        if tool_round > MAX_TOOL_ROUNDS:
+        _max_rounds = TOOL_ROUND_LIMITS.get(detected_agent, TOOL_ROUND_LIMITS["default"])
+        if tool_round > _max_rounds:
             logger.warning(
-                "chat_stream [%s]: reached MAX_TOOL_ROUNDS (%d) — forcing end_turn",
-                project_id, MAX_TOOL_ROUNDS,
+                "chat_stream [%s]: reached tool round limit (%d) for agent=%s — forcing end_turn",
+                project_id, _max_rounds, detected_agent,
             )
             if session_id and collected_text:
                 await save_message(session_id, "assistant", collected_text)
@@ -1189,7 +1494,12 @@ async def chat_stream(
         # Continue the while loop to stream the next LLM turn
 
 
-MAX_TOOL_ROUNDS = 6
+TOOL_ROUND_LIMITS: dict[str, int] = {
+    "coder":    12,   # code generation needs more rounds
+    "debugger": 10,   # bug tracing can go deep
+    "architect": 6,   # internal validator, should be quick
+    "default":   8,   # general chat
+}
 # Maximum characters returned by read_file before truncation (prevents context bloat)
 READ_FILE_MAX_CHARS = 12_000
 

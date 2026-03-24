@@ -19,6 +19,16 @@ from storage.models import (
 
 # ── Projects ──────────────────────────────────────────────────────────────────
 
+async def get_project(project_id: str) -> dict | None:
+    """Return project metadata (id, name, root_path) or None if not found."""
+    async with get_pg_session() as session:
+        result = await session.execute(select(Project).where(Project.id == project_id))
+        p = result.scalar_one_or_none()
+        if not p:
+            return None
+        return {"id": p.id, "name": p.name, "root_path": p.root_path}
+
+
 async def get_or_create_project(project_id: str, name: str = "", root_path: str = "") -> dict:
     async with get_pg_session() as session:
         result = await session.execute(select(Project).where(Project.id == project_id))

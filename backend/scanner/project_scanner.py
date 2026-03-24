@@ -21,6 +21,7 @@ from scanner.role_inference import (
     infer_role_heuristic,
     refine_role_with_graph,
     build_imported_by_index,
+    extract_annotations_and_superclass,
 )
 import embedding as _emb
 
@@ -715,12 +716,20 @@ async def _write_class_to_neo4j(
     package: str = "",
     role_confidence: float = 0.0,
     role_source: str = "default",
+    annotations: list[str] | None = None,
+    superclass: str | None = None,
+    declared_role: str | None = None,
 ) -> None:
+    # Preserve AI-inferred role/confidence if this node was previously tagged by AI.
+    # All other properties are overwritten on every scan to reflect the current code.
     cypher = (
         "MERGE (c:Class {name: $name, project_id: $project_id}) "
         "SET c.file_path = $file_path, c.layer = $layer, c.package = $package, "
-        "c.inferred_role = $layer, c.role_confidence = $role_confidence, "
-        "c.role_source = $role_source"
+        "c.annotations = $annotations, c.superclass = $superclass, "
+        "c.declared_role = $declared_role, "
+        "c.inferred_role = CASE WHEN c.role_source = 'ai' THEN c.inferred_role ELSE $layer END, "
+        "c.role_confidence = CASE WHEN c.role_source = 'ai' THEN c.role_confidence ELSE $role_confidence END, "
+        "c.role_source = CASE WHEN c.role_source = 'ai' THEN 'ai' ELSE $role_source END"
     )
     await neo4j_client.execute(cypher, {
         "name": class_name,
@@ -728,6 +737,9 @@ async def _write_class_to_neo4j(
         "file_path": file_path,
         "layer": layer,
         "package": package,
+        "annotations": annotations or [],
+        "superclass": superclass or "",
+        "declared_role": declared_role or "",
         "role_confidence": role_confidence,
         "role_source": role_source,
     })
@@ -751,20 +763,48 @@ def _detect_modules(root_path: str, source_files: list[str]) -> list[str]:
     return sorted(modules)
 
 
-def _build_class_registry(parsed_files: list[dict]) -> list[str]:
-    """Return every class seen during scan, annotated with its inferred role.
+_ROLE_TO_GROUP: dict[str, str] = {
+    "Controller": "controllers",
+    "Service":    "services",
+    "Repository": "repositories",
+    "Entity":     "entities",
+    "DTO":        "dtos",
+}
 
-    Format per entry: "ClassName (Role)" — sorted by role then name so the
-    LLM receives a grouped, readable roster instead of a partial entity list.
-    Classes whose role could not be determined are stored as "Util".
+
+def _build_class_registry(parsed_files: list[dict]) -> list[str]:
+    """Return ALL classes grouped by role in a structured, parseable format.
+
+    Output: one string per non-empty group, e.g.
+      "controllers: OrderController, ProductController"
+      "services: OrderService, ProductService"
+      "unclassified: SomeHelper"
+
+    When joined with '\\n' this gives the LLM an immediately readable class roster.
+    Classes with roles View/Util/Component/default go to 'unclassified'.
     """
-    entries: list[tuple[str, str]] = []
+    groups: dict[str, list[str]] = {
+        "controllers": [],
+        "services": [],
+        "repositories": [],
+        "entities": [],
+        "dtos": [],
+        "unclassified": [],
+    }
+    seen: set[str] = set()
     for pf in parsed_files:
         role = pf.get("layer", "Util") or "Util"
+        group = _ROLE_TO_GROUP.get(role, "unclassified")
         for cls in pf["classes"]:
-            entries.append((cls, role))
-    entries.sort(key=lambda x: (x[1], x[0]))
-    return [f"{name} ({role})" for name, role in entries]
+            if cls not in seen:
+                seen.add(cls)
+                groups[group].append(cls)
+
+    result: list[str] = []
+    for group_name, classes in groups.items():
+        if classes:
+            result.append(f"{group_name}: {', '.join(sorted(classes))}")
+    return result
 
 
 def _find_build_files(root_path: str, filename: str, max_depth: int = 2) -> list[str]:
@@ -1668,12 +1708,19 @@ async def _scan_project_impl(
             layer = pf["layer"]
             pkg = pf.get("package", "")
             fpath = pf["file_path"]
+            ext = Path(fpath).suffix
+            # Extract raw annotations/superclass once per file (first 8 KB read)
+            file_annotations, file_superclass, file_declared_role = \
+                extract_annotations_and_superclass(fpath, ext)
             for class_name in pf["classes"]:
                 try:
                     await _write_class_to_neo4j(
                         class_name, fpath, project_id, layer, pkg,
                         role_confidence=final_result.confidence if final_result else 0.0,
                         role_source=final_result.source if final_result else "default",
+                        annotations=file_annotations,
+                        superclass=file_superclass,
+                        declared_role=file_declared_role,
                     )
                     total_nodes_created += 1
                 except Exception:
@@ -1770,6 +1817,12 @@ async def _scan_project_impl(
     modules = _detect_modules(root_path, source_files)
     entities = _build_class_registry(parsed_files)
 
+    # Count classes per role (used for summary_text below)
+    class_role_counts: dict[str, int] = {}
+    for pf in parsed_files:
+        role = pf.get("layer", "Util") or "Util"
+        class_role_counts[role] = class_role_counts.get(role, 0) + len(pf["classes"])
+
     # Collect all imports across every parsed file for the import-based
     # framework fallback in _detect_stack.
     all_imports: list[str] = []
@@ -1838,16 +1891,37 @@ async def _scan_project_impl(
         if secondary_langs
         else ""
     )
-    # Build a role-breakdown string for the summary, e.g. "Controller=3, Service=5"
-    role_breakdown = ", ".join(
-        f"{k}={v}" for k, v in sorted(layer_file_counts.items())
+
+    # Build per-role class count summary, e.g. "7 controllers, 12 services, 3 unclassified"
+    _DISPLAY_ORDER = [
+        ("Controller", "controllers"),
+        ("Service",    "services"),
+        ("Repository", "repositories"),
+        ("Entity",     "entities"),
+        ("DTO",        "DTOs"),
+    ]
+    class_count_parts: list[str] = []
+    named_roles = {r for r, _ in _DISPLAY_ORDER}
+    for role_key, role_label in _DISPLAY_ORDER:
+        cnt = class_role_counts.get(role_key, 0)
+        if cnt:
+            class_count_parts.append(f"{cnt} {role_label}")
+    unclassified_cnt = sum(v for k, v in class_role_counts.items() if k not in named_roles)
+    if unclassified_cnt:
+        class_count_parts.append(f"{unclassified_cnt} unclassified")
+
+    class_count_str = (
+        (", ".join(class_count_parts) + ". Roles from annotations — unclassified classes can be identified by AI during chat.")
+        if class_count_parts
+        else f"{len(all_classes)} classes."
     )
+
     summary_text = (
+        f"{len(source_files)} source files. "
+        f"{class_count_str} "
         f"Language: {stack['language']}. Framework: {stack['framework']}. "
         f"Build tool: {stack['build_tool']}. "
-        f"{len(source_files)} source files across {len(modules)} modules. "
-        f"{len(all_classes)} classes ({role_breakdown}), {len(all_functions)} functions. "
-        f"Architecture pattern: {arch_pattern}. "
+        f"Architecture pattern: {arch_pattern}."
         + secondary_lang_note
     )
     try:

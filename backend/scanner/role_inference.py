@@ -432,6 +432,127 @@ def refine_role_with_graph(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Annotation harvesting — extract raw names and declared role
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maps annotation/decorator name → declared_role string (lowercase).
+# Only covers unambiguous structural annotations.
+_DECLARED_ROLE_FROM_ANNOTATION: dict[str, str] = {
+    "RestController":  "controller",
+    "Controller":      "controller",
+    "Service":         "service",
+    "Injectable":      "service",
+    "Repository":      "repository",
+    "Mapper":          "repository",
+    "Entity":          "entity",
+    "Table":           "entity",
+    "Document":        "entity",
+    "Component":       "component",
+    "Configuration":   "configuration",
+    "Module":          "configuration",
+}
+
+# Python base class patterns (substring match) → declared_role
+_PYTHON_BASE_TO_ROLE: list[tuple[str, str]] = [
+    ("models.Model",   "entity"),
+    ("Model",          "entity"),
+    ("APIView",        "controller"),
+    ("ViewSet",        "controller"),
+    ("GenericAPIView", "controller"),
+    ("Serializer",     "dto"),
+    ("TestCase",       "util"),
+]
+
+
+def extract_annotations_and_superclass(
+    file_path: str,
+    extension: str,
+) -> tuple[list[str], str | None, str | None]:
+    """Extract raw annotation/decorator names, superclass, and declared role.
+
+    Reads only the first 8 KB of the file (annotations are always near the top).
+
+    Returns:
+        annotations    — list of raw annotation/decorator names (deduped, order-preserved)
+        superclass     — direct superclass name or None
+        declared_role  — lowercase role string if an unambiguous annotation was found, else None
+    """
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
+            head = fh.read(8192)
+    except OSError:
+        return [], None, None
+
+    ext = extension.lower()
+    annotations: list[str] = []
+    superclass: str | None = None
+    declared_role: str | None = None
+
+    if ext in (".java", ".kt"):
+        # All @Annotation names (deduplicated, order-preserved)
+        seen: set[str] = set()
+        for ann in re.findall(r"@([A-Za-z][A-Za-z0-9_]*)\b", head):
+            if ann not in seen:
+                annotations.append(ann)
+                seen.add(ann)
+        # Superclass: `extends Foo`
+        sc_m = re.search(
+            r"(?:class|interface|enum|record)\s+\w+[^{;]*?\bextends\s+"
+            r"([A-Za-z_$][A-Za-z0-9_$]*)",
+            head,
+        )
+        if sc_m:
+            superclass = sc_m.group(1)
+        # Declared role from first matching annotation
+        for ann in annotations:
+            if ann in _DECLARED_ROLE_FROM_ANNOTATION:
+                declared_role = _DECLARED_ROLE_FROM_ANNOTATION[ann]
+                break
+
+    elif ext in (".ts", ".tsx", ".js", ".jsx"):
+        # NestJS/Angular decorators: @Foo( or @Foo\n
+        seen = set()
+        for ann in re.findall(r"@([A-Za-z][A-Za-z0-9_]*)\s*[\(\n]", head):
+            if ann not in seen:
+                annotations.append(ann)
+                seen.add(ann)
+        # Superclass: `extends Foo`
+        sc_m = re.search(
+            r"(?:class|interface)\s+\w+[^{;]*?\bextends\s+"
+            r"([A-Za-z_$][A-Za-z0-9_$]*)",
+            head,
+        )
+        if sc_m:
+            superclass = sc_m.group(1)
+        for ann in annotations:
+            if ann in _DECLARED_ROLE_FROM_ANNOTATION:
+                declared_role = _DECLARED_ROLE_FROM_ANNOTATION[ann]
+                break
+
+    elif ext == ".py":
+        # Function/class-level decorators
+        seen = set()
+        for ann in re.findall(r"^@([A-Za-z_][A-Za-z0-9_.]*)", head, re.MULTILINE):
+            if ann not in seen:
+                annotations.append(ann)
+                seen.add(ann)
+        # Base classes from first class definition
+        base_m = re.search(r"class\s+\w+\s*\(([^)]+)\)", head)
+        if base_m:
+            bases = [b.strip() for b in base_m.group(1).split(",")]
+            non_trivial = [b for b in bases if b and b not in ("object", "ABC")]
+            if non_trivial:
+                superclass = non_trivial[0]
+                for base_pattern, role in _PYTHON_BASE_TO_ROLE:
+                    if any(base_pattern in b for b in non_trivial):
+                        declared_role = role
+                        break
+
+    # Go: no annotations, no superclass in Go's type system
+    return annotations, superclass, declared_role
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Convenience: build the imported_by index from parsed_files list
 # ─────────────────────────────────────────────────────────────────────────────
 
