@@ -288,11 +288,14 @@ async def _execute_tool(tool_name: str, tool_input: dict, project_id: str) -> st
                 "message": f"Project has {total} indexed nodes across {len(layer_summary)} type/layer groups.",
             })
 
-        # Find nodes whose name or file path contains the query term (case-insensitive)
+        # Find nodes whose name, file path, or layer contains the query term (case-insensitive).
+        # Layer matching lets the AI search by role ("controller", "service", "repository")
+        # and find nodes even when neither the class name nor file path contains the term.
         cypher = """
             MATCH (n) WHERE n.project_id = $project_id
             AND (toLower(n.name) CONTAINS toLower($query)
-              OR toLower(n.file_path) CONTAINS toLower($query))
+              OR toLower(n.file_path) CONTAINS toLower($query)
+              OR toLower(n.layer) CONTAINS toLower($query))
             RETURN n.name AS name, labels(n)[0] AS type, n.layer AS layer, n.file_path AS file_path
             LIMIT 20
         """
@@ -305,7 +308,9 @@ async def _execute_tool(tool_name: str, tool_input: dict, project_id: str) -> st
                 MATCH (a)-[r:IMPORTS]->(b)
                 WHERE a.project_id = $project_id
                   AND (toLower(a.name) CONTAINS toLower($query)
-                    OR toLower(b.name) CONTAINS toLower($query))
+                    OR toLower(b.name) CONTAINS toLower($query)
+                    OR toLower(a.layer) CONTAINS toLower($query)
+                    OR toLower(b.layer) CONTAINS toLower($query))
                 RETURN a.name AS from, a.layer AS from_layer, b.name AS to, b.layer AS to_layer
                 LIMIT 30
             """
