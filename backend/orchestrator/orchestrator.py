@@ -170,7 +170,7 @@ TOOLS = [
                     "enum": ["module", "domain_entity", "architectural_decision", "rule"],
                     "description": "What kind of knowledge this is"
                 },
-                "content": {"type": "string", "description": "The knowledge to store"},
+                "content": {"type": "string", "description": "The knowledge to store. For domain_entity, use format 'ClassName (Role)' e.g. 'Integration (Entity)' or 'PaymentService (Service)'."},
                 "reason": {"type": "string", "description": "Why this qualifies as stable architectural knowledge"}
             },
             "required": ["project_id", "category", "content", "reason"]

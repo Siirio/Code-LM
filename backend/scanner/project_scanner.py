@@ -751,9 +751,20 @@ def _detect_modules(root_path: str, source_files: list[str]) -> list[str]:
     return sorted(modules)
 
 
-def _detect_entities(all_classes: list[str]) -> list[str]:
-    entity_suffixes = ("Model", "Entity", "Schema", "DTO", "Dto")
-    return sorted({name for name in all_classes if any(name.endswith(s) for s in entity_suffixes)})
+def _build_class_registry(parsed_files: list[dict]) -> list[str]:
+    """Return every class seen during scan, annotated with its inferred role.
+
+    Format per entry: "ClassName (Role)" — sorted by role then name so the
+    LLM receives a grouped, readable roster instead of a partial entity list.
+    Classes whose role could not be determined are stored as "Util".
+    """
+    entries: list[tuple[str, str]] = []
+    for pf in parsed_files:
+        role = pf.get("layer", "Util") or "Util"
+        for cls in pf["classes"]:
+            entries.append((cls, role))
+    entries.sort(key=lambda x: (x[1], x[0]))
+    return [f"{name} ({role})" for name, role in entries]
 
 
 def _find_build_files(root_path: str, filename: str, max_depth: int = 2) -> list[str]:
@@ -1757,7 +1768,7 @@ async def _scan_project_impl(
         logger.info("Scan [%s]: indexed %d files into Qdrant project_files", project_id, len(parsed_files))
 
     modules = _detect_modules(root_path, source_files)
-    entities = _detect_entities(all_classes)
+    entities = _build_class_registry(parsed_files)
 
     # Collect all imports across every parsed file for the import-based
     # framework fallback in _detect_stack.
@@ -1827,13 +1838,16 @@ async def _scan_project_impl(
         if secondary_langs
         else ""
     )
+    # Build a role-breakdown string for the summary, e.g. "Controller=3, Service=5"
+    role_breakdown = ", ".join(
+        f"{k}={v}" for k, v in sorted(layer_file_counts.items())
+    )
     summary_text = (
         f"Language: {stack['language']}. Framework: {stack['framework']}. "
         f"Build tool: {stack['build_tool']}. "
         f"{len(source_files)} source files across {len(modules)} modules. "
-        f"{len(all_classes)} classes, {len(all_functions)} functions. "
+        f"{len(all_classes)} classes ({role_breakdown}), {len(all_functions)} functions. "
         f"Architecture pattern: {arch_pattern}. "
-        + (f"Layers detected: {layer_summary}. " if layer_summary else "")
         + secondary_lang_note
     )
     try:
