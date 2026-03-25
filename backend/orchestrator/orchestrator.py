@@ -946,10 +946,18 @@ Use the pre-loaded memory and read files directly — the context is already her
 _CODER_PROMPT = """
 You are acting as the Coder Agent for this request.
 You handle ALL coding tasks: implementing features, fixing bugs, explaining code, and refactoring.
-For implementation: (1) read the relevant files first, (2) check the code graph for existing components, (3) propose changes with propose_file_edit — never paste raw code blocks as final output.
-For explanation: read the relevant file(s), then explain clearly citing actual file paths and function names.
-Follow the project's existing naming conventions and layer rules.
-Architecture validation runs automatically before every propose_file_edit — you will receive objections if violations are found. Revise accordingly.
+
+DISCOVERY RULES (read as many files as the task requires — there is no penalty for thorough reading):
+1. Start with query_code_graph to locate relevant classes.
+2. If query_code_graph returns no match or status "no_exact_match", IMMEDIATELY call search_text with a filename glob (e.g. "*Merchant*", "*.java") — do NOT ask the user where the file is.
+3. Read every file that is relevant to the task. For cross-cutting changes (e.g. RBAC across all controllers) read ALL affected controllers before writing a single line.
+4. You may batch multiple read_file calls in the same turn to reduce round trips.
+
+IMPLEMENTATION RULES:
+- propose changes with propose_file_edit — never paste raw code blocks as final output.
+- Follow the project's existing naming conventions and layer rules.
+- Architecture validation runs automatically before every propose_file_edit — you will receive objections if violations are found. Revise accordingly.
+- Complete the full implementation. Do not stop mid-task because you have read many files — reading is free, stopping early is not acceptable.
 """
 
 _INTENT_KEYWORDS: list[tuple[str, list[str]]] = [
@@ -1589,12 +1597,15 @@ class TaskPhase(str, Enum):
     EXECUTION    = "execution"
     FINALIZATION = "finalization"
 
-# Per-phase round budgets — PLANNING is tight to force early code writes,
-# EXECUTION is generous to handle multi-file edits.
+# Per-phase round budgets.
+# PLANNING is generous — discovery depth depends on task complexity and we
+# never want the AI to stop exploring mid-task because it ran out of rounds.
+# EXECUTION is very generous — multi-file changes can require many edit rounds.
+# FINALIZATION is tight — just enough for a memory update and summary.
 PHASE_LIMITS: dict[TaskPhase, int] = {
-    TaskPhase.PLANNING:     5,
-    TaskPhase.EXECUTION:    20,
-    TaskPhase.FINALIZATION: 3,
+    TaskPhase.PLANNING:     20,
+    TaskPhase.EXECUTION:    30,
+    TaskPhase.FINALIZATION: 5,
 }
 
 # Maximum characters returned by read_file before truncation (prevents context bloat)
