@@ -72,6 +72,7 @@ a = Analysis(
         'scanner.validator',
         'scanner.role_inference',
         'scanner.java_treesitter',
+        'scanner.module_detector',
     ],
     hookspath=[],
     hooksconfig={},
