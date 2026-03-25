@@ -986,6 +986,37 @@ def _agent_prompt_extension(agent: str) -> str:
     return ""
 
 
+# Short messages or continuation openers that suggest the user is extending the
+# previous task rather than starting a new one.
+_CONTINUATION_OPENERS = (
+    "also", "and then", "next", "now", "continue", "additionally",
+    "furthermore", "what about", "can you also", "then", "after that",
+    "ok now", "okay now", "now also",
+)
+
+
+def _is_continuation(message: str) -> bool:
+    """Return True if message looks like an extension of the previous task."""
+    lower = message.lower().strip()
+    if any(lower.startswith(op) for op in _CONTINUATION_OPENERS):
+        return True
+    # Very short messages (≤6 words) are likely follow-ups, not new tasks
+    if len(lower.split()) <= 6:
+        return True
+    return False
+
+
+def _select_agent(message: str, last_agent: str | None) -> str:
+    """Return the agent for this turn, respecting session continuity.
+
+    If the message looks like a continuation and we already have an active
+    non-main agent, stick with that agent instead of re-detecting.
+    """
+    if last_agent and last_agent != "main" and _is_continuation(message):
+        return last_agent
+    return _detect_agent(message)
+
+
 async def _summarize_history(history_messages: list[dict], api_key: str) -> list[dict]:
     """Summarize older history messages into a compact summary when history exceeds 10 messages.
 
@@ -1205,8 +1236,20 @@ async def chat_stream(
 
     client = anthropic.Anthropic(api_key=api_key)
 
-    # Detect sub-agent and emit it as first SSE event
-    detected_agent = _detect_agent(message)
+    # Working memory — ephemeral per-session understanding store
+    from orchestrator.working_memory import (
+        get_state as _wm_get_state,
+        update_from_file_read as _wm_file_read,
+        update_from_response as _wm_response,
+        format_injection as _wm_inject,
+    )
+    _wm_key = session_id or conversation_id or "__anon__"
+    _wm_state = _wm_get_state(_wm_key)
+
+    # Detect sub-agent with stickiness — continuation messages reuse last agent
+    detected_agent = _select_agent(message, _wm_state.last_agent)
+    _wm_state.last_agent = detected_agent
+    _wm_state.last_agent_task = message[:80]
     yield _sse({"agent": detected_agent, "status": "assigned"})
 
     # Filter tools and set graph depth for this skill — narrower context per agent type
@@ -1240,7 +1283,9 @@ async def chat_stream(
 
     messages.append({"role": "user", "content": message})
 
-    tool_round = 0
+    # Phase-aware tool round tracking (Task 8)
+    current_phase: TaskPhase = TaskPhase.PLANNING
+    phase_rounds: dict[str, int] = {p.value: 0 for p in TaskPhase}
     # Smart model routing: start with Haiku, escalate to Sonnet for code analysis
     current_model = "claude-haiku-4-5-20251001" if provider_name.lower() == "anthropic" else resolved_model
     # Budget tracking — starts at caller-supplied value, decremented per turn
@@ -1299,6 +1344,11 @@ async def chat_stream(
             "text": preload_block,
             "cache_control": {"type": "ephemeral"},
         })
+
+    # Inject working memory if anything was accumulated in prior turns this session
+    _wm_block = _wm_inject(_wm_key)
+    if _wm_block:
+        user_tool_result_content.append({"type": "text", "text": _wm_block})
 
     messages.append({"role": "user", "content": user_tool_result_content})
 
@@ -1401,6 +1451,10 @@ async def chat_stream(
                 block["input"] = parsed_input
                 tool_calls.append(block)
 
+        # Update working memory with decisions extracted from this turn's response
+        if collected_text:
+            _wm_response(_wm_key, collected_text)
+
         if stop_reason == "end_turn" or not tool_calls:
             # Persist assistant reply to session
             if session_id and collected_text:
@@ -1415,13 +1469,13 @@ async def chat_stream(
             yield _sse({"done": True})
             return
 
-        # Hard limit: stop tool loop to prevent runaway API usage
-        tool_round += 1
-        _max_rounds = TOOL_ROUND_LIMITS.get(detected_agent, TOOL_ROUND_LIMITS["default"])
-        if tool_round > _max_rounds:
+        # ── Phase-aware round limit (Task 8) ─────────────────────────────────
+        phase_rounds[current_phase.value] += 1
+        _phase_limit = PHASE_LIMITS[current_phase]
+        if phase_rounds[current_phase.value] > _phase_limit:
             logger.warning(
-                "chat_stream [%s]: reached tool round limit (%d) for agent=%s — forcing end_turn",
-                project_id, _max_rounds, detected_agent,
+                "chat_stream [%s]: phase=%s limit=%d reached for agent=%s — forcing end_turn",
+                project_id, current_phase.value, _phase_limit, detected_agent,
             )
             if session_id and collected_text:
                 await save_message(session_id, "assistant", collected_text)
@@ -1463,6 +1517,12 @@ async def chat_stream(
                 result = await _execute_tool(tc["name"], tc["input"], project_id)
                 tool_cache[cache_key] = (result, now)
 
+            # Working memory: record file reads
+            if tc["name"] == "read_file":
+                _fp = tc["input"].get("file_path") or tc["input"].get("path", "")
+                if _fp:
+                    _wm_file_read(_wm_key, _fp)
+
             # Emit file_edit SSE so the IDE can show an accept/reject dialog
             if tc["name"] == "propose_file_edit":
                 try:
@@ -1484,10 +1544,31 @@ async def chat_stream(
                 "content": tool_result_content,
             })
 
-        messages.append({"role": "user", "content": tool_results})
+        # ── Phase transitions ─────────────────────────────────────────────────
+        tool_names_this_round = [tc["name"] for tc in tool_calls]
+        if current_phase == TaskPhase.PLANNING and "propose_file_edit" in tool_names_this_round:
+            current_phase = TaskPhase.EXECUTION
+            logger.debug("chat_stream [%s]: phase PLANNING → EXECUTION", project_id)
+        elif current_phase == TaskPhase.EXECUTION and "suggest_memory_update" in tool_names_this_round:
+            current_phase = TaskPhase.FINALIZATION
+            logger.debug("chat_stream [%s]: phase EXECUTION → FINALIZATION", project_id)
+
+        # ── Soft phase warning (inject before next LLM call) ─────────────────
+        user_round_content: list[dict] = list(tool_results)
+        _phase_used = phase_rounds[current_phase.value]
+        _phase_cap  = PHASE_LIMITS[current_phase]
+        if _phase_used >= int(_phase_cap * 0.8):
+            _warn_msg = (
+                f"[System: You are approaching the {current_phase.value} phase limit "
+                f"({_phase_used}/{_phase_cap} rounds used). "
+                f"Summarize your findings and wrap up this phase.]"
+            )
+            user_round_content.append({"type": "text", "text": _warn_msg})
+
+        messages.append({"role": "user", "content": user_round_content})
 
         # Smart model routing: pick model for next round based on tools called this round
-        last_tool_names = [tc["name"] for tc in tool_calls]
+        last_tool_names = tool_names_this_round
         current_model = _select_model(provider_name, last_tool_names, resolved_model)
 
         tool_calls = []
@@ -1500,6 +1581,22 @@ TOOL_ROUND_LIMITS: dict[str, int] = {
     "architect": 6,   # internal validator, should be quick
     "default":   8,   # general chat
 }
+
+from enum import Enum
+
+class TaskPhase(str, Enum):
+    PLANNING     = "planning"
+    EXECUTION    = "execution"
+    FINALIZATION = "finalization"
+
+# Per-phase round budgets — PLANNING is tight to force early code writes,
+# EXECUTION is generous to handle multi-file edits.
+PHASE_LIMITS: dict[TaskPhase, int] = {
+    TaskPhase.PLANNING:     5,
+    TaskPhase.EXECUTION:    20,
+    TaskPhase.FINALIZATION: 3,
+}
+
 # Maximum characters returned by read_file before truncation (prevents context bloat)
 READ_FILE_MAX_CHARS = 12_000
 
