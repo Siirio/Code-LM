@@ -277,7 +277,7 @@ body {
   overflow: hidden;
   background: var(--bg);
   flex: 1;
-  min-width: 20%;
+  min-width: 320px;
 }
 
 .messages {
@@ -452,6 +452,122 @@ body {
 }
 
 @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
+
+/* ── Thinking Indicator ────────────────────────────────────────────────────── */
+
+.thinking-indicator {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 20px;
+  font-size: 11px;
+  border-top: 1px solid var(--border);
+  background: var(--bg2);
+  animation: fadeIn 0.2s;
+  position: relative;
+  overflow: hidden;
+}
+
+.thinking-agent {
+  color: var(--green);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.thinking-verb {
+  color: var(--text);
+  display: inline-block;
+  animation: thinkingFade 0.35s ease, thinkingWave 1.2s ease-in-out infinite;
+}
+
+.thinking-dots {
+  color: var(--accent);
+  width: 16px;
+  display: inline-block;
+}
+
+@keyframes thinkingFade {
+  from { opacity: 0; transform: translateY(3px) }
+  to   { opacity: 1; transform: translateY(0) }
+}
+
+@keyframes thinkingWave {
+  0%, 100% { transform: translateY(0) }
+  50%       { transform: translateY(-3px) }
+}
+
+/* Particle dots that fall from the verb */
+.thinking-particles {
+  position: relative;
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 6px;
+}
+
+.thinking-particle {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: particleFall 1.4s ease-in-out infinite;
+  opacity: 0;
+}
+
+@keyframes particleFall {
+  0%   { opacity: 0; transform: translateY(-6px) }
+  20%  { opacity: 0.9; transform: translateY(0) }
+  60%  { opacity: 0.6; transform: translateY(4px) }
+  100% { opacity: 0; transform: translateY(10px) }
+}
+
+/* ── New Chat Suggestion Banner ──────────────────────────────────────────── */
+
+.new-chat-suggestion {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 16px;
+  background: rgba(14, 99, 156, 0.12);
+  border-top: 1px solid rgba(14, 99, 156, 0.35);
+  font-size: 12px;
+  animation: fadeIn 0.25s;
+}
+
+.new-chat-suggestion-icon {
+  color: var(--accent);
+  font-size: 14px;
+}
+
+.new-chat-suggestion-text {
+  flex: 1;
+  color: var(--text-dim);
+}
+
+.new-chat-suggestion-btn {
+  padding: 3px 10px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+.new-chat-suggestion-btn:hover { background: var(--accent-hover); }
+
+.new-chat-suggestion-dismiss {
+  padding: 3px 8px;
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+.new-chat-suggestion-dismiss:hover { color: var(--text); border-color: var(--text-dim); }
 
 .input-bar {
   display: flex;

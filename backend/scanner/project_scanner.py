@@ -23,6 +23,7 @@ from scanner.role_inference import (
     build_imported_by_index,
     extract_annotations_and_superclass,
 )
+from scanner.module_detector import detect_modules
 import embedding as _emb
 
 DOC_EXTENSIONS: set[str] = {".md", ".pdf"}
@@ -719,17 +720,22 @@ async def _write_class_to_neo4j(
     annotations: list[str] | None = None,
     superclass: str | None = None,
     declared_role: str | None = None,
+    module: str = "_shared",
 ) -> None:
     # Preserve AI-inferred role/confidence if this node was previously tagged by AI.
     # All other properties are overwritten on every scan to reflect the current code.
+    # scan_count increments on every scan for AI-sourced nodes (used for confidence decay).
     cypher = (
         "MERGE (c:Class {name: $name, project_id: $project_id}) "
         "SET c.file_path = $file_path, c.layer = $layer, c.package = $package, "
         "c.annotations = $annotations, c.superclass = $superclass, "
         "c.declared_role = $declared_role, "
+        "c.module = $module, "
         "c.inferred_role = CASE WHEN c.role_source = 'ai' THEN c.inferred_role ELSE $layer END, "
         "c.role_confidence = CASE WHEN c.role_source = 'ai' THEN c.role_confidence ELSE $role_confidence END, "
-        "c.role_source = CASE WHEN c.role_source = 'ai' THEN 'ai' ELSE $role_source END"
+        "c.role_source = CASE WHEN c.role_source = 'ai' THEN 'ai' ELSE $role_source END, "
+        "c.scan_count = CASE WHEN c.role_source = 'ai' THEN coalesce(c.scan_count, 0) + 1 ELSE 0 END, "
+        "c.last_confirmed_scan = CASE WHEN c.role_source <> 'ai' THEN coalesce(c.scan_count, 0) ELSE c.last_confirmed_scan END"
     )
     await neo4j_client.execute(cypher, {
         "name": class_name,
@@ -742,7 +748,101 @@ async def _write_class_to_neo4j(
         "declared_role": declared_role or "",
         "role_confidence": role_confidence,
         "role_source": role_source,
+        "module": module,
     })
+
+
+async def _write_module_to_neo4j(
+    module_name: str,
+    project_id: str,
+    class_count: int,
+    roles_summary: str,
+    detection_method: str,
+) -> None:
+    cypher = (
+        "MERGE (m:Module {name: $name, project_id: $project_id}) "
+        "SET m.class_count = $class_count, "
+        "m.roles_summary = $roles_summary, "
+        "m.detection_method = $detection_method"
+    )
+    await neo4j_client.execute(cypher, {
+        "name": module_name,
+        "project_id": project_id,
+        "class_count": class_count,
+        "roles_summary": roles_summary,
+        "detection_method": detection_method,
+    })
+
+
+async def _write_belongs_to_edges(
+    project_id: str,
+    file_to_module: dict[str, str],
+    parsed_files: list[dict],
+) -> None:
+    """Write BELONGS_TO edges from each Class to its Module node."""
+    cypher = (
+        "MATCH (c:Class {name: $class_name, project_id: $project_id}), "
+        "(m:Module {name: $module_name, project_id: $project_id}) "
+        "MERGE (c)-[:BELONGS_TO]->(m)"
+    )
+    for pf in parsed_files:
+        mod = file_to_module.get(pf["file_path"], "_shared")
+        for cls in pf["classes"]:
+            try:
+                await neo4j_client.execute(cypher, {
+                    "class_name": cls,
+                    "project_id": project_id,
+                    "module_name": mod,
+                })
+            except Exception:
+                pass
+
+
+async def _write_cross_module_deps(project_id: str) -> None:
+    """Compute Module-level DEPENDS_ON edges from existing Class IMPORTS edges."""
+    cypher = """
+        MATCH (a:Class)-[:IMPORTS]->(b:Class)
+        WHERE a.project_id = $project_id AND b.project_id = $project_id
+          AND a.module IS NOT NULL AND b.module IS NOT NULL
+          AND a.module <> b.module
+        MATCH (ma:Module {name: a.module, project_id: $project_id})
+        MATCH (mb:Module {name: b.module, project_id: $project_id})
+        MERGE (ma)-[r:DEPENDS_ON]->(mb)
+        ON CREATE SET r.weight = 1
+        ON MATCH SET r.weight = r.weight + 1
+    """
+    await neo4j_client.execute(cypher, {"project_id": project_id})
+
+
+async def _apply_confidence_decay(project_id: str) -> None:
+    """Decay confidence for AI-inferred roles that haven't been reconfirmed in 3+ scans.
+
+    Classes where (scan_count - last_confirmed_scan) > 3 have their confidence
+    reduced by 0.15.  If confidence drops below 0.3, the inferred role is cleared.
+    Developer-approved roles (role_source='developer') are never decayed.
+    """
+    # Decay step: reduce confidence
+    decay_cypher = """
+        MATCH (c:Class {project_id: $project_id})
+        WHERE c.role_source = 'ai'
+          AND c.scan_count IS NOT NULL
+          AND c.last_confirmed_scan IS NOT NULL
+          AND (c.scan_count - c.last_confirmed_scan) > 3
+        SET c.role_confidence = c.role_confidence - 0.15
+    """
+    await neo4j_client.execute(decay_cypher, {"project_id": project_id})
+
+    # Clear stale inferences that fell below the threshold
+    clear_cypher = """
+        MATCH (c:Class {project_id: $project_id})
+        WHERE c.role_source = 'ai'
+          AND c.role_confidence IS NOT NULL
+          AND c.role_confidence < 0.3
+        SET c.inferred_role = null,
+            c.role_source = 'default',
+            c.role_confidence = 0.0
+    """
+    await neo4j_client.execute(clear_cypher, {"project_id": project_id})
 
 
 async def _write_function_to_neo4j(func_name: str, file_path: str, project_id: str) -> None:
@@ -750,61 +850,48 @@ async def _write_function_to_neo4j(func_name: str, file_path: str, project_id: s
     await neo4j_client.execute(cypher, {"name": func_name, "file_path": file_path, "project_id": project_id})
 
 
-def _detect_modules(root_path: str, source_files: list[str]) -> list[str]:
-    root = Path(root_path)
-    modules: set[str] = set()
-    for fpath in source_files:
-        try:
-            rel = Path(fpath).relative_to(root)
-            if len(rel.parts) > 1:
-                modules.add(rel.parts[0])
-        except ValueError:
-            pass
-    return sorted(modules)
-
-
-_ROLE_TO_GROUP: dict[str, str] = {
-    "Controller": "controllers",
-    "Service":    "services",
-    "Repository": "repositories",
-    "Entity":     "entities",
-    "DTO":        "dtos",
+_ROLE_DISPLAY: dict[str, str] = {
+    "Controller": "controller",
+    "Service":    "service",
+    "Repository": "repository",
+    "Entity":     "entity",
+    "DTO":        "dto",
+    "View":       "view",
+    "Component":  "component",
 }
 
 
-def _build_class_registry(parsed_files: list[dict]) -> list[str]:
-    """Return ALL classes grouped by role in a structured, parseable format.
+def _build_module_registry(
+    parsed_files: list[dict],
+    file_to_module: dict[str, str],
+) -> list[str]:
+    """Return all classes grouped by module in module-grouped format.
 
-    Output: one string per non-empty group, e.g.
-      "controllers: OrderController, ProductController"
-      "services: OrderService, ProductService"
-      "unclassified: SomeHelper"
-
-    When joined with '\\n' this gives the LLM an immediately readable class roster.
-    Classes with roles View/Util/Component/default go to 'unclassified'.
+    Each line: "module:{name} — ClassName(role), ClassName(role), ..."
+    Classes inside each module are sorted by role then name.
+    _shared and _unassigned modules appear last.
     """
-    groups: dict[str, list[str]] = {
-        "controllers": [],
-        "services": [],
-        "repositories": [],
-        "entities": [],
-        "dtos": [],
-        "unclassified": [],
-    }
+    # module → list of (class_name, role_display)
+    module_entries: dict[str, list[tuple[str, str]]] = {}
     seen: set[str] = set()
+
     for pf in parsed_files:
-        role = pf.get("layer", "Util") or "Util"
-        group = _ROLE_TO_GROUP.get(role, "unclassified")
+        mod = file_to_module.get(pf["file_path"], "_shared")
+        role_display = _ROLE_DISPLAY.get(pf.get("layer") or "Util", "unclassified")
         for cls in pf["classes"]:
             if cls not in seen:
                 seen.add(cls)
-                groups[group].append(cls)
+                module_entries.setdefault(mod, []).append((cls, role_display))
 
-    result: list[str] = []
-    for group_name, classes in groups.items():
-        if classes:
-            result.append(f"{group_name}: {', '.join(sorted(classes))}")
-    return result
+    def _sort_key(mod_name: str) -> tuple[int, str]:
+        return (1, mod_name) if mod_name.startswith("_") else (0, mod_name)
+
+    lines: list[str] = []
+    for mod in sorted(module_entries.keys(), key=_sort_key):
+        entries = sorted(module_entries[mod], key=lambda t: (t[1], t[0]))
+        entries_str = ", ".join(f"{cls}({role})" for cls, role in entries)
+        lines.append(f"module:{mod} — {entries_str}")
+    return lines
 
 
 def _find_build_files(root_path: str, filename: str, max_depth: int = 2) -> list[str]:
@@ -1701,13 +1788,33 @@ async def _scan_project_impl(
                 project_id, upgraded,
             )
 
-    # ── Deferred Neo4j class writes (uses final Tier 1+2 role) ───────────────
+    # ── Early stack + module detection (needed before Neo4j writes for module property) ──
+    _all_imports_early: list[str] = []
+    for pf in parsed_files:
+        _all_imports_early.extend(pf.get("imports", []))
+
+    stack_early = _detect_stack(root_path, all_imports=_all_imports_early, parsed_files=parsed_files)
+    if stack_early["language"] == "unknown":
+        stack_early["language"] = _infer_language_from_extensions(source_files)
+
+    file_to_module: dict[str, str] = {}
+    try:
+        file_to_module = detect_modules(root_path, parsed_files, stack_early)
+    except Exception:
+        logger.warning("Scan [%s]: module detection failed — all files assigned to _shared", project_id, exc_info=True)
+        file_to_module = {pf["file_path"]: "_shared" for pf in parsed_files}
+
+    for pf in parsed_files:
+        pf["module"] = file_to_module.get(pf["file_path"], "_shared")
+
+    # ── Deferred Neo4j class writes (uses final Tier 1+2 role + module) ──────
     if neo4j_available and parsed_files:
         for pf in parsed_files:
             final_result = pf.get("_role_result")
             layer = pf["layer"]
             pkg = pf.get("package", "")
             fpath = pf["file_path"]
+            mod = pf.get("module", "_shared")
             ext = Path(fpath).suffix
             # Extract raw annotations/superclass once per file (first 8 KB read)
             file_annotations, file_superclass, file_declared_role = \
@@ -1721,6 +1828,7 @@ async def _scan_project_impl(
                         annotations=file_annotations,
                         superclass=file_superclass,
                         declared_role=file_declared_role,
+                        module=mod,
                     )
                     total_nodes_created += 1
                 except Exception:
@@ -1737,6 +1845,61 @@ async def _scan_project_impl(
                 "Scan [%s]: resolve_and_write_edges failed — continuing",
                 project_id, exc_info=True,
             )
+
+    # ── Module nodes + BELONGS_TO edges + cross-module DEPENDS_ON ────────────
+    if neo4j_available and parsed_files and file_to_module:
+        try:
+            # Build per-module stats for Module node properties
+            mod_role_counts: dict[str, dict[str, int]] = {}
+            mod_class_counts: dict[str, int] = {}
+            for pf in parsed_files:
+                mod = pf.get("module", "_shared")
+                role = _ROLE_DISPLAY.get(pf.get("layer") or "Util", "unclassified")
+                mod_class_counts[mod] = mod_class_counts.get(mod, 0) + len(pf["classes"])
+                if mod not in mod_role_counts:
+                    mod_role_counts[mod] = {}
+                mod_role_counts[mod][role] = mod_role_counts[mod].get(role, 0) + len(pf["classes"])
+
+            # Determine detection method from stack
+            lang = (stack_early.get("language") or "").lower()
+            fw = (stack_early.get("framework") or "").lower()
+            if lang in ("java", "kotlin", "java/kotlin"):
+                det_method = "java_package"
+            elif "nestjs" in fw:
+                det_method = "nestjs_module"
+            elif lang == "python" and any(
+                pf["file_path"].endswith("apps.py") for pf in parsed_files
+            ):
+                det_method = "django_app"
+            elif lang == "go":
+                det_method = "go_package"
+            else:
+                det_method = "directory"
+
+            for mod_name, class_count in mod_class_counts.items():
+                role_counts = mod_role_counts.get(mod_name, {})
+                roles_summary = ", ".join(
+                    f"{cnt} {role}" for role, cnt in sorted(role_counts.items()) if cnt
+                )
+                await _write_module_to_neo4j(
+                    mod_name, project_id, class_count, roles_summary, det_method
+                )
+
+            await _write_belongs_to_edges(project_id, file_to_module, parsed_files)
+        except Exception:
+            logger.warning("Scan [%s]: Module node/BELONGS_TO write failed — continuing", project_id, exc_info=True)
+
+        # DEPENDS_ON edges require IMPORTS edges to already exist (written above)
+        try:
+            await _write_cross_module_deps(project_id)
+        except Exception:
+            logger.warning("Scan [%s]: cross-module DEPENDS_ON write failed — continuing", project_id, exc_info=True)
+
+        # Task 7: confidence decay for stale AI inferences
+        try:
+            await _apply_confidence_decay(project_id)
+        except Exception:
+            logger.warning("Scan [%s]: confidence decay step failed — continuing", project_id, exc_info=True)
 
     # --- Qdrant file index ---
     # Index each parsed file into the project_files collection with real
@@ -1814,20 +1977,8 @@ async def _scan_project_impl(
 
         logger.info("Scan [%s]: indexed %d files into Qdrant project_files", project_id, len(parsed_files))
 
-    modules = _detect_modules(root_path, source_files)
-    entities = _build_class_registry(parsed_files)
-
-    # Count classes per role (used for summary_text below)
-    class_role_counts: dict[str, int] = {}
-    for pf in parsed_files:
-        role = pf.get("layer", "Util") or "Util"
-        class_role_counts[role] = class_role_counts.get(role, 0) + len(pf["classes"])
-
-    # Collect all imports across every parsed file for the import-based
-    # framework fallback in _detect_stack.
-    all_imports: list[str] = []
-    for pf in parsed_files:
-        all_imports.extend(pf.get("imports", []))
+    # Use the stack computed earlier (stack_early is canonical — same inputs)
+    stack = stack_early
 
     layer_names = {_classify_layer(c) for c in all_classes}
     if "Controller" in layer_names and "Service" in layer_names:
@@ -1837,20 +1988,13 @@ async def _scan_project_impl(
     else:
         arch_type = "unknown"
 
-    stack = _detect_stack(root_path, all_imports=all_imports, parsed_files=parsed_files)
-
-    # If config-file detection could not identify the language, fall back to
-    # counting source file extensions so the summary never reads "unknown".
-    if stack["language"] == "unknown":
-        stack["language"] = _infer_language_from_extensions(source_files)
-
-    # ── Architecture pattern detection (CodeAiPlan.md Section 9) ─────────────
-    # Count how many source files belong to each architectural layer so we can
-    # detect dominant patterns and automatically save rules to PostgreSQL.
+    # ── Architecture pattern detection ────────────────────────────────────────
     layer_file_counts: dict[str, int] = {}
+    class_role_counts: dict[str, int] = {}
     for pf in parsed_files:
         lyr = pf["layer"]
         layer_file_counts[lyr] = layer_file_counts.get(lyr, 0) + 1
+        class_role_counts[lyr] = class_role_counts.get(lyr, 0) + len(pf["classes"])
 
     has_controller = "Controller" in layer_file_counts
     has_service = "Service" in layer_file_counts
@@ -1871,10 +2015,6 @@ async def _scan_project_impl(
         project_id, stack, arch_type, len(all_classes), len(all_functions),
     )
 
-    # Build a layer summary string, e.g. "Controller=3, Service=5, Repository=2"
-    layer_summary = ", ".join(
-        f"{k}={v}" for k, v in sorted(layer_file_counts.items()) if k != "Util"
-    )
     arch_pattern = "unknown"
     if has_controller and has_service and has_repository:
         arch_pattern = "Controller-Service-Repository (layered)"
@@ -1892,7 +2032,26 @@ async def _scan_project_impl(
         else ""
     )
 
-    # Build per-role class count summary, e.g. "7 controllers, 12 services, 3 unclassified"
+    # ── Module-grouped class registry for project_memory.domain_entities ─────
+    entities = _build_module_registry(parsed_files, file_to_module)
+    module_names = sorted({pf.get("module", "_shared") for pf in parsed_files})
+
+    # Module summary for the headline: "order(8), auth(7), ..."
+    def _mkey(m: str) -> tuple[int, str]:
+        return (1, m) if m.startswith("_") else (0, m)
+
+    mod_class_count_map: dict[str, int] = {}
+    for pf in parsed_files:
+        m = pf.get("module", "_shared")
+        mod_class_count_map[m] = mod_class_count_map.get(m, 0) + len(pf["classes"])
+
+    module_summary_parts = ", ".join(
+        f"{m}({mod_class_count_map[m]})"
+        for m in sorted(mod_class_count_map.keys(), key=_mkey)
+    )
+    total_classes = sum(len(pf["classes"]) for pf in parsed_files)
+
+    # Per-role count string
     _DISPLAY_ORDER = [
         ("Controller", "controllers"),
         ("Service",    "services"),
@@ -1900,8 +2059,8 @@ async def _scan_project_impl(
         ("Entity",     "entities"),
         ("DTO",        "DTOs"),
     ]
-    class_count_parts: list[str] = []
     named_roles = {r for r, _ in _DISPLAY_ORDER}
+    class_count_parts: list[str] = []
     for role_key, role_label in _DISPLAY_ORDER:
         cnt = class_role_counts.get(role_key, 0)
         if cnt:
@@ -1909,16 +2068,13 @@ async def _scan_project_impl(
     unclassified_cnt = sum(v for k, v in class_role_counts.items() if k not in named_roles)
     if unclassified_cnt:
         class_count_parts.append(f"{unclassified_cnt} unclassified")
+    role_str = ", ".join(class_count_parts) if class_count_parts else f"{total_classes} classes"
 
-    class_count_str = (
-        (", ".join(class_count_parts) + ". Roles from annotations — unclassified classes can be identified by AI during chat.")
-        if class_count_parts
-        else f"{len(all_classes)} classes."
-    )
-
+    n_modules = len(mod_class_count_map)
     summary_text = (
-        f"{len(source_files)} source files. "
-        f"{class_count_str} "
+        f"{len(source_files)} source files, {total_classes} classes across {n_modules} modules: "
+        f"{module_summary_parts}. "
+        f"Roles: {role_str}. "
         f"Language: {stack['language']}. Framework: {stack['framework']}. "
         f"Build tool: {stack['build_tool']}. "
         f"Architecture pattern: {arch_pattern}."
@@ -1929,7 +2085,7 @@ async def _scan_project_impl(
             project_id=project_id,
             summary=summary_text,
             architecture_type=arch_type,
-            modules=modules,
+            modules=module_names,
             domain_entities=entities,
         )
         await memory_service.mark_project_scanned(project_id, files_count=len(source_files))
@@ -1963,7 +2119,7 @@ async def _scan_project_impl(
             logger.warning("Scan [%s]: pattern discovery failed — continuing", project_id, exc_info=True)
 
     result = {"files_found": len(source_files), "classes_found": len(all_classes),
-              "functions_found": len(all_functions), "modules": modules,
+              "functions_found": len(all_functions), "modules": module_names,
               "docs_indexed": docs_indexed}
     logger.info("Scan [%s]: completed — %s", project_id, result)
     return result

@@ -241,6 +241,7 @@ function FileTreePanel({ rootPath, onFileOpen, onRefresh, pushUndo, refreshSigna
   const treeBodyRef = useRef<HTMLDivElement>(null)
   const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const selectedPathsRef = useRef<Set<string>>(new Set())
+  const lastSelectedPathRef = useRef<string | null>(null)
 
   // When #app-root has transform:scale(), position:fixed children are positioned
   // relative to that container, not the viewport. Divide clientX/Y by the scale
@@ -412,6 +413,54 @@ function FileTreePanel({ rootPath, onFileOpen, onRefresh, pushUndo, refreshSigna
     }
   }
 
+  /** Return all visible item paths in DOM order (for Shift+Click range selection). */
+  function getVisiblePaths(): string[] {
+    if (!treeBodyRef.current) return []
+    const allItems = Array.from(treeBodyRef.current.querySelectorAll<HTMLElement>('[data-tree-path]'))
+    return allItems.map(el => el.getAttribute('data-tree-path') || '').filter(Boolean)
+  }
+
+  function handleItemClick(e: React.MouseEvent, path: string, isDir: boolean) {
+    if (e.ctrlKey || e.metaKey) {
+      // Ctrl+Click: toggle this single item
+      e.preventDefault()
+      setSelectedPaths(prev => {
+        const next = new Set(prev)
+        if (next.has(path)) next.delete(path)
+        else next.add(path)
+        selectedPathsRef.current = next
+        return next
+      })
+      lastSelectedPathRef.current = path
+    } else if (e.shiftKey) {
+      // Shift+Click: select range from lastSelected to this item
+      e.preventDefault()
+      const visible = getVisiblePaths()
+      const lastIdx = lastSelectedPathRef.current ? visible.indexOf(lastSelectedPathRef.current) : -1
+      const thisIdx = visible.indexOf(path)
+      if (lastIdx === -1) {
+        // No previous selection — select from top to clicked
+        const rangeEnd = thisIdx >= 0 ? thisIdx : 0
+        const next = new Set(visible.slice(0, rangeEnd + 1))
+        selectedPathsRef.current = next
+        setSelectedPaths(next)
+      } else {
+        const [lo, hi] = lastIdx <= thisIdx ? [lastIdx, thisIdx] : [thisIdx, lastIdx]
+        const next = new Set(visible.slice(lo, hi + 1))
+        selectedPathsRef.current = next
+        setSelectedPaths(next)
+      }
+      lastSelectedPathRef.current = path
+    } else {
+      // Plain click: normal behavior
+      setSelectedPaths(new Set())
+      selectedPathsRef.current = new Set()
+      lastSelectedPathRef.current = null
+      if (isDir) toggle(path)
+      else onFileOpen?.(path)
+    }
+  }
+
   function renderNode(node: TreeNode, depth: number): React.ReactNode {
     const isOpen = expanded.has(node.path)
     const indent = depth * 14
@@ -424,9 +473,10 @@ function FileTreePanel({ rootPath, onFileOpen, onRefresh, pushUndo, refreshSigna
               if (el) itemRefs.current.set(node.path, el)
               else itemRefs.current.delete(node.path)
             }}
+            data-tree-path={node.path}
             className={`tree-item tree-dir${selectedPaths.has(node.path) ? ' tree-item-selected' : ''}`}
             style={{ paddingLeft: `${8 + indent}px` }}
-            onClick={() => toggle(node.path)}
+            onClick={e => handleItemClick(e, node.path, true)}
             onContextMenu={e => {
               e.preventDefault()
               e.stopPropagation()
@@ -457,10 +507,11 @@ function FileTreePanel({ rootPath, onFileOpen, onRefresh, pushUndo, refreshSigna
           if (el) itemRefs.current.set(node.path, el)
           else itemRefs.current.delete(node.path)
         }}
+        data-tree-path={node.path}
         className={`tree-item tree-file${selectedPaths.has(node.path) ? ' tree-item-selected' : ''}`}
         style={{ paddingLeft: `${8 + indent}px` }}
         title={node.path}
-        onClick={() => onFileOpen?.(node.path)}
+        onClick={e => handleItemClick(e, node.path, false)}
         onContextMenu={e => {
           e.preventDefault()
           e.stopPropagation()
@@ -649,6 +700,48 @@ function ScanShelf({
   )
 }
 
+// ── ThinkingIndicator ────────────────────────────────────────────────────────
+
+const THINKING_VERBS = [
+  'Analyzing', 'Reading', 'Planning', 'Searching', 'Tracing',
+  'Mapping', 'Checking', 'Reasoning', 'Scanning', 'Inspecting',
+  'Connecting', 'Resolving', 'Indexing', 'Exploring', 'Thinking',
+]
+
+function ThinkingIndicator({ agent, tool }: { agent?: string; tool?: string }) {
+  const [verbIdx, setVerbIdx] = useState(0)
+  const [dotCount, setDotCount] = useState(1)
+
+  useEffect(() => {
+    const verbTimer = setInterval(() => {
+      setVerbIdx(i => (i + 1) % THINKING_VERBS.length)
+    }, 900)
+    const dotTimer = setInterval(() => {
+      setDotCount(d => (d % 3) + 1)
+    }, 400)
+    return () => { clearInterval(verbTimer); clearInterval(dotTimer) }
+  }, [])
+
+  const verb = tool
+    ? `Querying ${tool}`
+    : THINKING_VERBS[verbIdx]
+  const dots = '.'.repeat(dotCount)
+  const label = agent && agent !== 'main' ? `[${agent}] ` : ''
+
+  return (
+    <div className="thinking-indicator">
+      <span className="thinking-agent">{label}</span>
+      <span className="thinking-verb">{verb}</span>
+      <span className="thinking-dots">{dots}</span>
+      <span className="thinking-particles" aria-hidden="true">
+        {Array.from({ length: 5 }).map((_, i) => (
+          <span key={i} className="thinking-particle" style={{ animationDelay: `${i * 0.18}s` }} />
+        ))}
+      </span>
+    </div>
+  )
+}
+
 // ── IDE ───────────────────────────────────────────────────────────────────────
 
 function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
@@ -667,6 +760,9 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   const [fileChanges, setFileChanges] = useState<FileChange[]>([])
   const [todos, setTodos] = useState<TodoItem[]>([])
   const [changesBadge, setChangesBadge] = useState(0)
+  const [activeAgent, setActiveAgent] = useState<string | undefined>(undefined)
+  const [activeTool, setActiveTool] = useState<string | undefined>(undefined)
+  const [newChatSuggestion, setNewChatSuggestion] = useState<string | null>(null)
 
   // Settings
   const [settings, setSettings] = useState<CodeLMSettings>(loadSettings)
@@ -994,7 +1090,10 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
     try {
       const data = await fetchFileContent(path)
       setOpenFile({ path, ...data })
-      setMidWidth(Math.floor((window.innerWidth - leftWidth - 12) * 0.75))
+      // Cap file panel to 55% of available space so chat always has room (min 320px)
+      const available = window.innerWidth - leftWidth - 12
+      const chatMinPx = Math.max(320, Math.floor(available * 0.35))
+      setMidWidth(Math.min(Math.floor(available * 0.65), available - chatMinPx))
     } catch (e) {
       addSystem(`Could not open file: ${e}`)
     }
@@ -1078,11 +1177,17 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
     setInput('')
     setSlashSuggestions([])
 
-    // Prepend active scan shelf items as context hints for the AI
+    // Run deferred scans for queued shelf items, then prepend context hints
     if (activeScanIds.size > 0) {
-      const ctxPaths = scanShelf
-        .filter(s => activeScanIds.has(s.id))
-        .map(s => `${s.type === 'file' ? 'file' : 'package'}:${s.path}`)
+      const activeItems = scanShelf.filter(s => activeScanIds.has(s.id))
+      for (const item of activeItems) {
+        try {
+          setStatusLine(`Scanning ${item.name}...`)
+          await runScan(item.type === 'package' ? 'folder' : 'smart', item.path)
+        } catch { /* ignore scan errors — AI can still use read_file */ }
+      }
+      setStatusLine('')
+      const ctxPaths = activeItems.map(s => `${s.type === 'file' ? 'file' : 'package'}:${s.path}`)
       if (ctxPaths.length > 0) {
         msg = `[Scan context: ${ctxPaths.join(', ')}]\n${msg}`
       }
@@ -1124,6 +1229,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
       setSessions(prev => [s as Session, ...prev])
     }
 
+    setNewChatSuggestion(null)
     addMessage('user', msg)
     setBusy(true)
 
@@ -1139,6 +1245,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
       { project_id: projectId, message: msg, session_id: sessionId },
       {
         onChunk: text => {
+          setActiveTool(undefined)  // clear tool indicator once text is flowing
           setMessages(prev =>
             prev.map(m =>
               m.id === assistantId
@@ -1147,10 +1254,12 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
             )
           )
         },
-        onTool: name => setStatusLine(`Querying ${name}...`),
+        onTool: name => { setActiveTool(name); setStatusLine('') },
         onAgent: name => {
           agentLabel = name
-          setStatusLine(`[${name}] thinking...`)
+          setActiveAgent(name)
+          setActiveTool(undefined)
+          setStatusLine('')
         },
         onCost: (_cost, newBalance) => {
           setCredits({ balance_usd: newBalance })
@@ -1172,12 +1281,17 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
         onTodosAdded: () => {
           refreshChanges(sessionId)
         },
+        onSuggestNewChat: reason => {
+          setNewChatSuggestion(reason)
+        },
         onDone: () => {
           setMessages(prev =>
             prev.map(m => (m.id === assistantId ? { ...m, streaming: false } : m))
           )
           setBusy(false)
           setStatusLine('')
+          setActiveAgent(undefined)
+          setActiveTool(undefined)
           listSessions(projectId).then(setSessions).catch(() => {})
           refreshChanges(sessionId)
           inputRef.current?.focus()
@@ -1191,6 +1305,8 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
             )
           )
           setBusy(false)
+          setActiveAgent(undefined)
+          setActiveTool(undefined)
           setStatusLine('')
         },
       }
@@ -1285,12 +1401,13 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
                 const rawPath = cmd.replace(isPackage ? '/package-scan ' : '/auto-scan ', '').trim()
                 const name = rawPath.split(/[/\\]/).filter(Boolean).pop() || rawPath
                 const id = btoa(rawPath).replace(/[^a-zA-Z0-9]/g, '').slice(0, 20)
-                await runScan(isPackage ? 'folder' : 'smart', rawPath)
+                // Defer scan until the user submits their message — just queue to shelf
                 setScanShelf(prev => prev.some(s => s.path === rawPath) ? prev : [
                   ...prev,
                   { id, type: isPackage ? 'package' : 'file', name, path: rawPath },
                 ])
                 setActiveScanIds(prev => new Set([...prev, id]))
+                addSystem(`Queued for scan: ${name} — will index when you send your message`)
                 setTimeout(() => inputRef.current?.focus(), 50)
               }}
             />
@@ -1409,6 +1526,23 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
             <div ref={messagesEndRef} />
           </div>
 
+          {newChatSuggestion && (
+            <div className="new-chat-suggestion">
+              <span className="new-chat-suggestion-icon">↗</span>
+              <span className="new-chat-suggestion-text">New topic detected — a fresh chat gives better results.</span>
+              <button
+                className="new-chat-suggestion-btn"
+                onClick={async () => { setNewChatSuggestion(null); await newSession() }}
+              >New Chat</button>
+              <button
+                className="new-chat-suggestion-dismiss"
+                onClick={() => setNewChatSuggestion(null)}
+              >Continue here</button>
+            </div>
+          )}
+          {busy && !statusLine && (
+            <ThinkingIndicator agent={activeAgent} tool={activeTool} />
+          )}
           {statusLine && <div className="status-line">{statusLine}</div>}
 
           {scanShelf.length > 0 && (

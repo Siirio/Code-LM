@@ -293,6 +293,66 @@ async def _execute_tool(tool_name: str, tool_input: dict, project_id: str) -> st
                 "message": "Neo4j not connected. Ensure Neo4j is running and the backend has started correctly.",
             })
 
+        # Module-specific query shortcuts
+        _q_lower = query_text.lower().strip()
+
+        # "module:<name>" or "show module order" → load all classes in that module
+        _module_name: str | None = None
+        import re as _re_graph
+        _mod_match = _re_graph.match(r'^module[:\s]+(\w+)$', _q_lower)
+        if _mod_match:
+            _module_name = _mod_match.group(1)
+        elif _q_lower.startswith("show module "):
+            _module_name = _q_lower[len("show module "):]
+        elif _q_lower.startswith("list module "):
+            _module_name = _q_lower[len("list module "):]
+
+        if _module_name:
+            mod_rows = await neo4j_client.query(
+                """
+                MATCH (c:Class {module: $module, project_id: $project_id})
+                RETURN c.name AS name, c.declared_role AS declared_role,
+                       coalesce(c.declared_role, c.layer) AS role,
+                       c.layer AS layer, c.file_path AS file_path
+                ORDER BY c.layer, c.name
+                """,
+                {"project_id": project_id, "module": _module_name},
+            )
+            dep_rows = await neo4j_client.query(
+                """
+                MATCH (m:Module {name: $module, project_id: $project_id})-[d:DEPENDS_ON]->(other:Module)
+                RETURN other.name AS depends_on, d.weight AS import_count
+                ORDER BY d.weight DESC
+                """,
+                {"project_id": project_id, "module": _module_name},
+            )
+            return json.dumps({
+                "status": "ok",
+                "query": query_text,
+                "module": _module_name,
+                "nodes": mod_rows,
+                "cross_module_deps": dep_rows,
+                "message": f"Module '{_module_name}': {len(mod_rows)} classes.",
+            })
+
+        # "modules" or "list modules" → return all Module nodes
+        if _q_lower in ("modules", "list modules", "all modules", "module overview"):
+            mod_overview = await neo4j_client.query(
+                """
+                MATCH (m:Module {project_id: $project_id})
+                RETURN m.name AS name, m.class_count AS class_count,
+                       m.roles_summary AS roles_summary, m.detection_method AS detection_method
+                ORDER BY m.class_count DESC
+                """,
+                {"project_id": project_id},
+            )
+            return json.dumps({
+                "status": "ok",
+                "query": query_text,
+                "nodes": mod_overview,
+                "message": f"Found {len(mod_overview)} modules.",
+            })
+
         # When the query is empty or generic, return a layer/type breakdown overview.
         # IMPORTANT: put results in "nodes" so the LLM does not misread an empty
         # "nodes" list as "graph is empty" — each row is a {type, layer, count} summary.
@@ -361,6 +421,31 @@ async def _execute_tool(tool_name: str, tool_input: dict, project_id: str) -> st
                     "total_graph_nodes": 0,
                     "message": "Graph is empty for this project. Run /full-scan to index it.",
                 })
+            # Check if the query term matches a known module name — if so,
+            # return that module's classes instead of a random sample.
+            module_match = await neo4j_client.query(
+                "MATCH (m:Module {project_id: $project_id}) "
+                "WHERE toLower(m.name) CONTAINS toLower($query) "
+                "RETURN m.name AS name LIMIT 1",
+                {"project_id": project_id, "query": query_text},
+            )
+            if module_match:
+                matched_mod = module_match[0]["name"]
+                mod_nodes = await neo4j_client.query(
+                    "MATCH (c:Class {module: $module, project_id: $project_id}) "
+                    "RETURN c.name AS name, coalesce(c.declared_role, c.layer) AS role, "
+                    "c.layer AS layer, c.file_path AS file_path "
+                    "ORDER BY c.layer, c.name",
+                    {"project_id": project_id, "module": matched_mod},
+                )
+                return json.dumps({
+                    "status": "module_match",
+                    "query": query_text,
+                    "module": matched_mod,
+                    "nodes": mod_nodes,
+                    "message": f"Query matched module '{matched_mod}' ({len(mod_nodes)} classes).",
+                })
+
             # Fallback: return a sample of nodes so the AI always has something
             # concrete to work with instead of an empty result.
             sample_nodes = await neo4j_client.query(
@@ -785,31 +870,42 @@ _LAYER_FROM_TYPE_WORD: dict[str, str] = {
 
 
 def _parse_class_registry(domain_entities: list[str]) -> dict[str, str]:
-    """Parse the grouped domain_entities format into {class_name: group_name}.
+    """Parse domain_entities into {class_name: module_or_group}.
 
-    Handles both new grouped format ("controllers: A, B") and legacy
-    per-entry format ("A (Controller)").
+    Handles:
+    - Module format:  "module:order — OrderController(controller), OrderService(service)"
+    - Role format:    "controllers: OrderController, ProductController"
+    - Legacy format:  "OrderController (Controller)"
     """
-    class_to_group: dict[str, str] = {}
+    import re as _re
+    class_to_module: dict[str, str] = {}
     for line in domain_entities:
         line = line.strip()
         if not line:
             continue
-        if ":" in line:
-            # New grouped format: "controllers: OrderController, ProductController"
+        # Module-grouped format: "module:order — ClassName(role), ..."
+        if line.startswith("module:"):
+            mod_part, _, entries_str = line.partition(" — ")
+            mod_name = mod_part[len("module:"):].strip()
+            for entry in entries_str.split(","):
+                entry = entry.strip()
+                m = _re.match(r"^(\w+)\(", entry)
+                if m:
+                    class_to_module[m.group(1)] = mod_name
+        elif ":" in line:
+            # Role-grouped: "controllers: OrderController, ProductController"
             group, _, names_str = line.partition(":")
             group = group.strip()
             for name in names_str.split(","):
                 name = name.strip()
                 if name:
-                    class_to_group[name] = group
+                    class_to_module[name] = group
         elif "(" in line and ")" in line:
-            # Legacy format: "OrderController (Controller)"
-            import re as _re
+            # Legacy: "OrderController (Controller)"
             m = _re.match(r"^(\w+)\s+\((\w+)\)$", line)
             if m:
-                class_to_group[m.group(1)] = m.group(2).lower() + "s"
-    return class_to_group
+                class_to_module[m.group(1)] = m.group(2).lower() + "s"
+    return class_to_module
 
 
 async def _build_preload_context(
@@ -855,10 +951,80 @@ async def _build_preload_context(
         if len(matched_classes) >= 5:
             break
 
+    # Also match module names directly from the message
+    # e.g. "order feature" → load the "order" module
+    all_module_names: set[str] = set()
+    for line in domain_entities:
+        if line.startswith("module:"):
+            mod_part = line.split(" — ")[0]
+            all_module_names.add(mod_part[len("module:"):].strip())
+
+    matched_modules: list[str] = []
+    for mod_name in all_module_names:
+        if mod_name.startswith("_"):
+            continue
+        if mod_name in message_lower or any(
+            word.startswith(mod_name) or mod_name.startswith(word)
+            for word in words if len(word) > 3
+        ):
+            matched_modules.append(mod_name)
+
+    # Find module via matched class name
+    for cls_name in matched_classes:
+        mod = class_to_group.get(cls_name, "")
+        if mod and not mod.startswith("_") and mod not in matched_modules:
+            matched_modules.append(mod)
+
     # Build graph context if Neo4j available
-    graph_lines: list[str] = []
-    if _neo4j.is_connected and matched_classes:
-        for cls_name in matched_classes:
+    graph_sections: list[str] = []
+    loaded_class_count = 0
+    MAX_PRELOAD_CLASSES = 20
+
+    if _neo4j.is_connected and matched_modules:
+        # Load entire module(s) — primary first, up to cap
+        for mod_name in matched_modules[:2]:
+            if loaded_class_count >= MAX_PRELOAD_CLASSES:
+                break
+            try:
+                limit = MAX_PRELOAD_CLASSES - loaded_class_count
+                rows = await _neo4j.query(
+                    """
+                    MATCH (c:Class {project_id: $project_id, module: $module})
+                    RETURN c.name AS name, c.file_path AS file_path,
+                           coalesce(c.declared_role, c.layer) AS role
+                    ORDER BY c.layer, c.name
+                    LIMIT $limit
+                    """,
+                    {"project_id": project_id, "module": mod_name, "limit": limit},
+                )
+                if rows:
+                    section = [f"Module: {mod_name} ({len(rows)} classes)"]
+                    for r in rows:
+                        section.append(f"- {r['name']} ({r.get('role','?')}) — {r.get('file_path','?')}")
+                    loaded_class_count += len(rows)
+
+                    # Cross-module dependencies
+                    dep_rows = await _neo4j.query(
+                        """
+                        MATCH (m:Module {name: $module, project_id: $project_id})-[d:DEPENDS_ON]->(other:Module)
+                        RETURN other.name AS dep, d.weight AS weight
+                        ORDER BY d.weight DESC LIMIT 5
+                        """,
+                        {"project_id": project_id, "module": mod_name},
+                    )
+                    if dep_rows:
+                        dep_str = ", ".join(
+                            f"{r['dep']}({r['weight']} imports)" for r in dep_rows
+                        )
+                        section.append(f"Cross-module dependencies: {dep_str}")
+
+                    graph_sections.append("\n".join(section))
+            except Exception:
+                pass
+
+    elif _neo4j.is_connected and matched_classes and not matched_modules:
+        # Fallback: individual class neighborhoods (no module data in graph yet)
+        for cls_name in matched_classes[:5]:
             try:
                 rows = await _neo4j.query(
                     """
@@ -882,12 +1048,12 @@ async def _build_preload_context(
                         parts.append(f"  Imports: {', '.join(imp_list)}")
                     if imp_by:
                         parts.append(f"  Imported by: {', '.join(imp_by)}")
-                    graph_lines.append("\n".join(parts))
+                    graph_sections.append("\n".join(parts))
             except Exception:
                 pass
 
-    elif _neo4j.is_connected and is_code_gen and not matched_classes:
-        # Load existing classes of the target type as a reference
+    elif _neo4j.is_connected and is_code_gen and not matched_classes and not matched_modules:
+        # Load existing classes of target type as a reference pattern
         target_layer = next(
             (_LAYER_FROM_TYPE_WORD[w] for w in words if w in _LAYER_FROM_TYPE_WORD),
             None,
@@ -900,34 +1066,32 @@ async def _build_preload_context(
                     {"project_id": project_id, "layer": target_layer},
                 )
                 if existing:
-                    graph_lines.append(f"Existing {target_layer} classes:")
+                    section = [f"Existing {target_layer} classes (as reference pattern):"]
                     for r in existing:
-                        graph_lines.append(f"  - {r['name']} — {r.get('file_path', '?')}")
+                        section.append(f"  - {r['name']} — {r.get('file_path', '?')}")
+                    graph_sections.append("\n".join(section))
             except Exception:
                 pass
 
-    # Only inject when graph lines or debug mode provides useful context
-    if not graph_lines and not is_debug:
+    if not graph_sections and not is_debug:
         return None
 
     lines = ["[Pre-loaded Context]"]
     summary = mem.get("summary", "")
     if summary:
-        # Extract first sentence of summary as project headline
         first_sentence = summary.split(".")[0] + "." if "." in summary else summary
         lines.append(first_sentence)
 
-    if graph_lines:
+    if graph_sections:
         lines.append("\nRelevant to your request:")
-        lines.extend(graph_lines)
+        lines.extend(graph_sections)
     elif is_debug:
-        # For debug requests without matched classes, add class registry summary
-        group_counts = {}
+        module_counts: dict[str, int] = {}
         for grp in class_to_group.values():
-            group_counts[grp] = group_counts.get(grp, 0) + 1
-        if group_counts:
-            counts_str = ", ".join(f"{v} {k}" for k, v in sorted(group_counts.items()))
-            lines.append(f"\nClass registry: {counts_str}")
+            module_counts[grp] = module_counts.get(grp, 0) + 1
+        if module_counts:
+            counts_str = ", ".join(f"{v} in {k}" for k, v in sorted(module_counts.items()))
+            lines.append(f"\nModule/group summary: {counts_str}")
 
     lines.append("[End Pre-loaded Context]")
     return "\n".join(lines)
@@ -1249,10 +1413,32 @@ async def chat_stream(
         get_state as _wm_get_state,
         update_from_file_read as _wm_file_read,
         update_from_response as _wm_response,
+        update_task_contract as _wm_contract,
+        detect_topic_shift as _wm_topic_shift,
         format_injection as _wm_inject,
+        format_task_contract as _wm_contract_inject,
     )
     _wm_key = session_id or conversation_id or "__anon__"
     _wm_state = _wm_get_state(_wm_key)
+
+    # Topic shift detection — suggest a new chat before spending tokens
+    if _wm_topic_shift(_wm_key, message):
+        yield _sse({
+            "suggest_new_chat": True,
+            "reason": (
+                "This looks like a new topic unrelated to the current task. "
+                "Starting a fresh chat gives the AI a clean context and better results. "
+                "Continue here if this is a clarification."
+            ),
+        })
+
+    # Set goal on first message; treat follow-up messages as refinements
+    if not _wm_get_state(_wm_key).task_contract.goal:
+        _wm_contract(_wm_key, goal=message)
+    else:
+        # Only record as refinement if it's substantive (not a one-word reply)
+        if len(message.split()) >= 5:
+            _wm_contract(_wm_key, refinement=message)
 
     # Detect sub-agent with stickiness — continuation messages reuse last agent
     detected_agent = _select_agent(message, _wm_state.last_agent)
@@ -1278,7 +1464,9 @@ async def chat_stream(
         if persona and persona.get("system_prompt_extra"):
             dynamic_context += f"\n\n{persona['system_prompt_extra']}"
 
-    # Sub-agents run with fresh context (no history) — main agent uses session history
+    # Main agent: full session history (with summarization for long sessions)
+    # Sub-agents (coder, debugger): fresh context BUT with Task Contract + working memory
+    # injected so they know the goal, constraints, and what has been done so far.
     messages: list[dict] = []
     if session_id and detected_agent == "main":
         history = await get_messages(session_id)
@@ -1286,7 +1474,22 @@ async def chat_stream(
         messages = await _summarize_history(history_msgs, api_key)
         await save_message(session_id, "user", message)
     elif session_id:
-        # Sub-agents: fresh context, but still persist messages for continuity
+        # Sub-agents: include a compact session summary so they share intent with Main.
+        # We do NOT pass full history (token cost) — just the task contract + summary.
+        history = await get_messages(session_id)
+        if len(history) >= 2:
+            # Build a quick transcript of the last few turns for the sub-agent
+            recent = history[-6:]  # last 3 user+assistant pairs
+            compact_lines: list[str] = ["[Session context for this sub-agent]"]
+            for msg in recent:
+                role_label = "User" if msg["role"] == "user" else "Assistant"
+                content = msg["content"] if isinstance(msg["content"], str) else ""
+                if content:
+                    compact_lines.append(f"{role_label}: {content[:300]}")
+            compact_lines.append("[End session context]")
+            compact_summary = "\n".join(compact_lines)
+            messages.append({"role": "user", "content": compact_summary})
+            messages.append({"role": "assistant", "content": "Understood. I have the session context."})
         await save_message(session_id, "user", message)
 
     messages.append({"role": "user", "content": message})
@@ -1357,6 +1560,13 @@ async def chat_stream(
     _wm_block = _wm_inject(_wm_key)
     if _wm_block:
         user_tool_result_content.append({"type": "text", "text": _wm_block})
+
+    # Inject Task Contract for sub-agents (coder, debugger) — gives them goal + intent
+    # Main agent already has session history; sub-agents need this to avoid working blind.
+    if detected_agent != "main":
+        _tc_block = _wm_contract_inject(_wm_key)
+        if _tc_block:
+            user_tool_result_content.append({"type": "text", "text": _tc_block})
 
     messages.append({"role": "user", "content": user_tool_result_content})
 
@@ -1537,6 +1747,10 @@ async def chat_stream(
                     edit_data = json.loads(result)
                     if edit_data.get("status") == "proposal_ready":
                         yield _sse({"file_edit": edit_data})
+                        # Track changed file in task contract for cross-agent awareness
+                        _changed_fp = tc["input"].get("file_path", "")
+                        if _changed_fp:
+                            _wm_contract(_wm_key, file_changed=_changed_fp)
                 except Exception:
                     pass
 

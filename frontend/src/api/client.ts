@@ -250,6 +250,7 @@ export function chatStream(
     onDone: () => void
     onError: (err: string) => void
     onTodosAdded?: (count: number) => void
+    onSuggestNewChat?: (reason: string) => void
   }
 ): () => void {
   const controller = new AbortController()
@@ -300,6 +301,7 @@ export function chatStream(
               callbacks.onCost(event.cost_usd, newBalance)
             }
             else if (event.todos_added && callbacks.onTodosAdded) callbacks.onTodosAdded(event.todos_added)
+            else if (event.suggest_new_chat && callbacks.onSuggestNewChat) callbacks.onSuggestNewChat(event.reason || '')
             else if (event.done) callbacks.onDone()
           } catch {
             // skip malformed SSE lines
