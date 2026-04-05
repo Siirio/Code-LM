@@ -2163,4 +2163,3 @@ function MessageBubble({
     </div>
   )
 }
-
