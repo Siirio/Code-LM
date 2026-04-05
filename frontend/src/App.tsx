@@ -227,9 +227,11 @@ interface FileTreePanelProps {
   /** CSS scale factor applied to #app-root — needed to correct fixed-position
    *  context menu coords when transform:scale() is active. */
   menuScale?: number
+  /** Wheel event handler for zoom controls */
+  onWheel?: (e: React.WheelEvent) => void
 }
 
-function FileTreePanel({ rootPath, onFileOpen, onRefresh, pushUndo, refreshSignal, onScanRequest, menuScale = 1.0 }: FileTreePanelProps) {
+function FileTreePanel({ rootPath, onFileOpen, onRefresh, pushUndo, refreshSignal, onScanRequest, menuScale = 1.0, onWheel }: FileTreePanelProps) {
   const [tree, setTree] = useState<TreeNode | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [error, setError] = useState('')
@@ -570,6 +572,13 @@ function FileTreePanel({ rootPath, onFileOpen, onRefresh, pushUndo, refreshSigna
         className="tree-body"
         ref={treeBodyRef}
         style={{ position: 'relative' }}
+        onWheel={e => {
+          if (e.ctrlKey && onWheel) {
+            e.preventDefault()
+            e.stopPropagation()
+            onWheel(e)
+          }
+        }}
         onMouseDown={e => {
           if (e.button === 0 && (e.target as Element).closest('.tree-item')) return
           if (e.button !== 0 && e.button !== 2) return
@@ -1482,6 +1491,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
               pushUndo={pushUndoOp}
               refreshSignal={treeKey}
               menuScale={SCALE_ZOOM[settings.uiScale] ?? 1.0}
+              onWheel={handleLeftPanelWheel}
               onScanRequest={async (cmd) => {
                 setLeftTab('chats')
                 const isPackage = cmd.startsWith('/package-scan ')
