@@ -82,7 +82,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="CodeLM Backend",
     description="AI Software Architect — orchestrator and knowledge engine",
-    version="1.1.1",
+    version="1.1.2",
     lifespan=lifespan,
 )
 
@@ -100,7 +100,7 @@ app.include_router(router, prefix="/api/v1")
 async def health():
     return {
         "status": "ok",
-        "version": "1.1.1",
+        "version": "1.1.2",
         "storage": {
             "postgres": "connected" if True else "unavailable",  # engine exists if init succeeded
             "neo4j": "connected" if neo4j_client.is_connected else "unavailable",
