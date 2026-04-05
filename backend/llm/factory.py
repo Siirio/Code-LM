@@ -15,7 +15,11 @@ def get_provider(provider_name: str, model: str, api_key: str) -> LLMProvider:
         from llm.anthropic_provider import AnthropicProvider
         return AnthropicProvider(api_key=api_key, model=model)
 
+    if name == "deepseek":
+        from llm.deepseek_provider import DeepSeekProvider
+        return DeepSeekProvider(api_key=api_key, model=model)
+
     raise ValueError(
         f"Unknown LLM provider: '{provider_name}'. "
-        f"Supported: 'anthropic'"
+        f"Supported: 'anthropic', 'deepseek'"
     )

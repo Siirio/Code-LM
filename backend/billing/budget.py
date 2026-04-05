@@ -1,8 +1,12 @@
 """Real-cost budget enforcement for Code LM's managed API key mode.
 
-Pricing (Anthropic, 2025, per 1M tokens):
-  claude-sonnet-4-6          input $3.00  output $15.00  cache_read $0.30  cache_write $3.75
-  claude-haiku-4-5-20251001  input $0.80  output  $4.00  cache_read $0.08  cache_write $1.00
+Pricing (per 1M tokens):
+  Anthropic:
+    claude-sonnet-4-6          input $3.00  output $15.00  cache_read $0.30  cache_write $3.75
+    claude-haiku-4-5-20251001  input $0.80  output  $4.00  cache_read $0.08  cache_write $1.00
+  DeepSeek:
+    deepseek-chat              input $0.14  output  $0.28
+    deepseek-reasoner          input $0.55  output  $2.19
 """
 from __future__ import annotations
 
@@ -20,6 +24,18 @@ _PRICING: dict[str, dict[str, float]] = {
         "output":       4.00,
         "cache_read":   0.08,
         "cache_write":  1.00,
+    },
+    "deepseek-chat": {
+        "input":        0.14,
+        "output":       0.28,
+        "cache_read":   0.014,
+        "cache_write":  0.0,
+    },
+    "deepseek-reasoner": {
+        "input":        0.55,
+        "output":       2.19,
+        "cache_read":   0.055,
+        "cache_write":  0.0,
     },
 }
 

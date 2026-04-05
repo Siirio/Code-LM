@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from llm.factory import get_provider
 from billing import budget as _budget
 from orchestrator.skills import apply_skill
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -1189,17 +1190,20 @@ def _select_agent(message: str, last_agent: str | None) -> str:
     return _detect_agent(message)
 
 
-async def _summarize_history(history_messages: list[dict], api_key: str) -> list[dict]:
+async def _summarize_history(
+    history_messages: list[dict],
+    api_key: str,
+    provider_name: str = "anthropic",
+) -> list[dict]:
     """Summarize older history messages into a compact summary when history exceeds 10 messages.
 
-    Takes the older messages (all but the last 10), calls Claude Haiku to produce
+    Takes the older messages (all but the last 10), calls a fast/cheap model to produce
     a 1-2 paragraph summary, then returns a condensed message list:
     [summary_user_msg, ack_assistant_msg] + last_10_messages.
     """
     if len(history_messages) <= 10:
         return history_messages
 
-    import anthropic
     older = history_messages[:-10]
     recent = history_messages[-10:]
 
@@ -1211,25 +1215,35 @@ async def _summarize_history(history_messages: list[dict], api_key: str) -> list
         transcript_lines.append(f"{role_label}: {content}")
     transcript = "\n".join(transcript_lines)
 
+    summarize_prompt = (
+        "Summarize the following conversation into 1-2 concise paragraphs. "
+        "Focus on key decisions, topics discussed, and any important context. "
+        "Be factual and brief.\n\n"
+        f"{transcript}"
+    )
+
     try:
-        client = anthropic.Anthropic(api_key=api_key)
-        summary_response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=300,
-            messages=[{
-                "role": "user",
-                "content": (
-                    "Summarize the following conversation into 1-2 concise paragraphs. "
-                    "Focus on key decisions, topics discussed, and any important context. "
-                    "Be factual and brief.\n\n"
-                    f"{transcript}"
-                ),
-            }],
-        )
-        summary_text = summary_response.content[0].text
+        if provider_name.lower() == "deepseek":
+            from openai import OpenAI
+            from llm.deepseek_provider import DEEPSEEK_BASE_URL
+            client = OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
+            resp = client.chat.completions.create(
+                model="deepseek-chat",
+                max_tokens=300,
+                messages=[{"role": "user", "content": summarize_prompt}],
+            )
+            summary_text = resp.choices[0].message.content or ""
+        else:
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key)
+            resp = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=300,
+                messages=[{"role": "user", "content": summarize_prompt}],
+            )
+            summary_text = resp.content[0].text
     except Exception:
         logger.warning("History summarization failed — falling back to truncation", exc_info=True)
-        # Fallback: just use the last 10 messages without summary
         return recent
 
     condensed = [
@@ -1244,8 +1258,50 @@ def _default_model(provider_name: str) -> str:
     """Return the default model name for a given LLM provider."""
     defaults = {
         "anthropic": "claude-sonnet-4-6",
+        "deepseek": "deepseek-chat",
     }
     return defaults.get(provider_name.lower().strip(), "claude-sonnet-4-6")
+
+
+async def gather_context_via_hypothesis(project_id: str, user_request: str) -> str:
+    """Gather context using hypothesis-driven exploration."""
+    if not settings.hypothesis_mode_enabled:
+        return ""
+
+    try:
+        from orchestrator.hypothesis_engine import run_hypothesis_engine
+        logger.info("Running hypothesis engine for request: %s", user_request)
+        context = await run_hypothesis_engine(project_id, user_request)
+
+        # Format context for LLM
+        lines = []
+        lines.append("=== HYPOTHESIS ENGINE CONTEXT ===")
+        lines.append(f"User request: {context['user_request']}")
+        if context.get('discovered_goal'):
+            lines.append(f"Discovered goal: {context['discovered_goal']}")
+        lines.append(f"Confidence: {context['confidence']:.2f}")
+        lines.append("")
+
+        if context['facts']:
+            lines.append("Confirmed facts:")
+            for fact in context['facts']:
+                lines.append(f"  • {fact['text']} (from {fact['source']})")
+            lines.append("")
+
+        if context['hypotheses']:
+            lines.append("Active hypotheses:")
+            for hyp in context['hypotheses']:
+                lines.append(f"  • {hyp['text']} (confidence: {hyp['confidence']:.2f})")
+            lines.append("")
+
+        if context['visited_nodes']:
+            lines.append(f"Explored nodes: {', '.join(context['visited_nodes'])}")
+            lines.append(f"Steps taken: {context['steps_taken']}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error("Hypothesis engine failed: %s", e, exc_info=True)
+        return f"[Hypothesis engine error: {e}]"
 
 
 async def chat(
@@ -1285,6 +1341,11 @@ async def chat(
         "Always pass this exact project_id value when calling any tool."
     )
 
+    # Add hypothesis engine context if enabled
+    hypothesis_context = await gather_context_via_hypothesis(project_id, message)
+    if hypothesis_context:
+        dynamic_context += f"\n\n{hypothesis_context}"
+
     # Append agent persona system prompt if set
     if agent_id:
         persona = await get_persona(agent_id)
@@ -1296,7 +1357,7 @@ async def chat(
     if session_id:
         history = await get_messages(session_id)
         history_msgs = [{"role": msg["role"], "content": msg["content"]} for msg in history]
-        messages = await _summarize_history(history_msgs, api_key)
+        messages = await _summarize_history(history_msgs, api_key, provider_name)
         # Persist the new user message
         await save_message(session_id, "user", message)
 
@@ -1313,17 +1374,8 @@ async def chat(
             break
 
         if response.stop_reason == "tool_use":
-            # Append assistant turn to history
-            if hasattr(response.raw, "content"):
-                # Convert Pydantic content blocks to plain dicts so they survive
-                # re-serialisation in subsequent API calls without pydantic-core errors.
-                content = [
-                    block.model_dump() if hasattr(block, "model_dump") else block
-                    for block in response.raw.content
-                ]
-                messages.append({"role": "assistant", "content": content})
-            else:
-                messages.append({"role": "assistant", "content": response.reply or ""})
+            # Append assistant turn to history (provider builds the correct format)
+            messages.append(provider.assistant_message(response))
 
             # Execute all tool calls and collect results.
             # project_id is passed explicitly so the correct value is always used
@@ -1393,20 +1445,21 @@ async def chat_stream(
         yield _sse({"done": True})
         return
 
-    import anthropic
-
     from storage.memory_service import (
         get_messages, add_message as save_message, get_persona,
     )
 
-    if provider_name != "anthropic":
-        yield _sse({"chunk": "Streaming is currently only supported with the Anthropic provider."})
-        yield _sse({"done": True})
-        return
-
     resolved_model = model or _default_model(provider_name)
 
-    client = anthropic.Anthropic(api_key=api_key)
+    if provider_name.lower() == "deepseek":
+        from openai import OpenAI as _OpenAI
+        from llm.deepseek_provider import anthropic_tools_to_openai, anthropic_messages_to_openai, DEEPSEEK_BASE_URL
+        _deepseek_client = _OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
+        _anthropic_client = None
+    else:
+        import anthropic as _anthropic
+        _anthropic_client = _anthropic.Anthropic(api_key=api_key)
+        _deepseek_client = None
 
     # Working memory — ephemeral per-session understanding store
     from orchestrator.working_memory import (
@@ -1471,7 +1524,7 @@ async def chat_stream(
     if session_id and detected_agent == "main":
         history = await get_messages(session_id)
         history_msgs = [{"role": msg["role"], "content": msg["content"]} for msg in history]
-        messages = await _summarize_history(history_msgs, api_key)
+        messages = await _summarize_history(history_msgs, api_key, provider_name)
         await save_message(session_id, "user", message)
     elif session_id:
         # Sub-agents: include a compact session summary so they share intent with Main.
@@ -1578,86 +1631,161 @@ async def chat_stream(
             else 4096
         )
 
-        # Open a streaming request to Anthropic
-        with client.messages.stream(
-            model=current_model,
-            max_tokens=max_tokens,
-            system=system_param,
-            tools=skill_tools,
-            messages=messages,
-            extra_headers={"anthropic-beta": "token-efficient-tools-2025-02-19"},
-        ) as stream:
-            # Accumulate the full response so we can append it to history
-            collected_text = ""
-            collected_content_blocks: list[dict] = []
-            stop_reason = "end_turn"
-            tool_calls = []
+        # Accumulate the full response so we can append it to history
+        collected_text = ""
+        collected_content_blocks: list[dict] = []
+        stop_reason = "end_turn"
+        tool_calls = []
 
-            for event in stream:
-                if event.type == "content_block_start":
-                    block = event.content_block
-                    if block.type == "text":
-                        collected_content_blocks.append(
-                            {"type": "text", "text": ""}
-                        )
-                    elif block.type == "tool_use":
-                        collected_content_blocks.append(
-                            {"type": "tool_use", "id": block.id, "name": block.name, "input": ""}
-                        )
-                        yield _sse({"tool": block.name, "status": "running"})
+        if provider_name.lower() == "deepseek":
+            # ── DeepSeek streaming (OpenAI-compatible) ────────────────────────
+            _sys_text = system_param if isinstance(system_param, str) else SYSTEM_PROMPT
+            _oai_messages = [{"role": "system", "content": _sys_text}] + anthropic_messages_to_openai(messages)
+            _oai_tools = anthropic_tools_to_openai(skill_tools)
+            _ds_kwargs: dict = {
+                "model": current_model,
+                "max_tokens": max_tokens,
+                "messages": _oai_messages,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            }
+            if _oai_tools:
+                _ds_kwargs["tools"] = _oai_tools
+            _partial_tcs: dict[int, dict] = {}
+            _ds_usage = None
 
-                elif event.type == "content_block_delta":
-                    delta = event.delta
-                    if delta.type == "text_delta":
-                        collected_text += delta.text
-                        # Update last text block
-                        if collected_content_blocks and collected_content_blocks[-1]["type"] == "text":
-                            collected_content_blocks[-1]["text"] += delta.text
-                        yield _sse({"chunk": delta.text})
-                    elif delta.type == "input_json_delta":
-                        # Accumulate partial JSON for tool input
-                        if collected_content_blocks and collected_content_blocks[-1]["type"] == "tool_use":
-                            collected_content_blocks[-1]["input"] += delta.partial_json
+            for chunk in _deepseek_client.chat.completions.create(**_ds_kwargs):  # type: ignore[union-attr]
+                if chunk.usage:
+                    _ds_usage = chunk.usage
+                    continue
+                if not chunk.choices:
+                    continue
+                _ch_delta = chunk.choices[0].delta
+                _finish = chunk.choices[0].finish_reason
 
-                elif event.type == "message_delta":
-                    stop_reason = getattr(event.delta, "stop_reason", "end_turn") or "end_turn"
+                if _ch_delta.content:
+                    collected_text += _ch_delta.content
+                    if collected_content_blocks and collected_content_blocks[-1]["type"] == "text":
+                        collected_content_blocks[-1]["text"] += _ch_delta.content
+                    else:
+                        collected_content_blocks.append({"type": "text", "text": _ch_delta.content})
+                    yield _sse({"chunk": _ch_delta.content})
 
-            # ── Budget accounting (inside the `with` block while stream is still open)
-            # IMPORTANT: this try/except must NEVER silently swallow failures.
-            # If usage is missing we log a WARNING so the operator knows money
-            # may have been spent without being tracked.  We don't crash the
-            # stream — the user already received the response — but the event
-            # is recorded so it can be investigated and reconciled.
-            try:
-                final_msg = stream.get_final_message()
-                u = final_msg.usage
-                call_cost = _budget.cost_usd(
-                    model=current_model,
-                    input_tokens=u.input_tokens,
-                    output_tokens=u.output_tokens,
-                    cache_read_tokens=getattr(u, "cache_read_input_tokens", 0) or 0,
-                    cache_write_tokens=getattr(u, "cache_creation_input_tokens", 0) or 0,
-                )
-                remaining_budget -= call_cost
-                yield _sse({"cost_usd": round(call_cost, 6), "balance_usd": round(remaining_budget, 6)})
-                logger.info(
-                    "chat_stream [%s] turn cost: $%.6f | model=%s | in=%d out=%d "
-                    "cache_read=%d cache_write=%d | balance: $%.4f",
-                    project_id, call_cost, current_model,
-                    u.input_tokens, u.output_tokens,
-                    getattr(u, "cache_read_input_tokens", 0) or 0,
-                    getattr(u, "cache_creation_input_tokens", 0) or 0,
-                    remaining_budget,
-                )
-            except Exception as exc:
-                # Stream was interrupted (client disconnect, timeout, API error)
-                # before usage was finalised.  Budget NOT decremented — conservative:
-                # better to under-charge than to silently lose tracking.
-                logger.warning(
-                    "chat_stream [%s]: usage unavailable after turn — cost NOT tracked. "
-                    "model=%s reason=%s",
-                    project_id, current_model, exc,
-                )
+                if _ch_delta.tool_calls:
+                    for _tc_d in _ch_delta.tool_calls:
+                        _i = _tc_d.index
+                        if _i not in _partial_tcs:
+                            _partial_tcs[_i] = {"id": "", "name": "", "arguments": ""}
+                        if _tc_d.id:
+                            _partial_tcs[_i]["id"] = _tc_d.id
+                        if _tc_d.function:
+                            if _tc_d.function.name:
+                                if not _partial_tcs[_i]["name"]:
+                                    yield _sse({"tool": _tc_d.function.name, "status": "running"})
+                                _partial_tcs[_i]["name"] += _tc_d.function.name
+                            if _tc_d.function.arguments:
+                                _partial_tcs[_i]["arguments"] += _tc_d.function.arguments
+
+                if _finish == "tool_calls":
+                    stop_reason = "tool_use"
+
+            for _i in sorted(_partial_tcs.keys()):
+                _tc = _partial_tcs[_i]
+                collected_content_blocks.append({
+                    "type": "tool_use",
+                    "id": _tc["id"],
+                    "name": _tc["name"],
+                    "input": _tc["arguments"],  # raw JSON string; parsed below
+                })
+
+            if _ds_usage:
+                try:
+                    call_cost = _budget.cost_usd(
+                        model=current_model,
+                        input_tokens=_ds_usage.prompt_tokens,
+                        output_tokens=_ds_usage.completion_tokens,
+                    )
+                    remaining_budget -= call_cost
+                    yield _sse({"cost_usd": round(call_cost, 6), "balance_usd": round(remaining_budget, 6)})
+                    logger.info(
+                        "chat_stream [%s] turn cost: $%.6f | model=%s | in=%d out=%d | balance: $%.4f",
+                        project_id, call_cost, current_model,
+                        _ds_usage.prompt_tokens, _ds_usage.completion_tokens, remaining_budget,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "chat_stream [%s]: DeepSeek usage tracking failed. model=%s reason=%s",
+                        project_id, current_model, exc,
+                    )
+
+        else:
+            # ── Anthropic streaming ───────────────────────────────────────────
+            with _anthropic_client.messages.stream(  # type: ignore[union-attr]
+                model=current_model,
+                max_tokens=max_tokens,
+                system=system_param,
+                tools=skill_tools,
+                messages=messages,
+                extra_headers={"anthropic-beta": "token-efficient-tools-2025-02-19"},
+            ) as stream:
+                for event in stream:
+                    if event.type == "content_block_start":
+                        block = event.content_block
+                        if block.type == "text":
+                            collected_content_blocks.append({"type": "text", "text": ""})
+                        elif block.type == "tool_use":
+                            collected_content_blocks.append(
+                                {"type": "tool_use", "id": block.id, "name": block.name, "input": ""}
+                            )
+                            yield _sse({"tool": block.name, "status": "running"})
+
+                    elif event.type == "content_block_delta":
+                        delta = event.delta
+                        if delta.type == "text_delta":
+                            collected_text += delta.text
+                            if collected_content_blocks and collected_content_blocks[-1]["type"] == "text":
+                                collected_content_blocks[-1]["text"] += delta.text
+                            yield _sse({"chunk": delta.text})
+                        elif delta.type == "input_json_delta":
+                            if collected_content_blocks and collected_content_blocks[-1]["type"] == "tool_use":
+                                collected_content_blocks[-1]["input"] += delta.partial_json
+
+                    elif event.type == "message_delta":
+                        stop_reason = getattr(event.delta, "stop_reason", "end_turn") or "end_turn"
+
+                # ── Budget accounting (inside the `with` block while stream is still open)
+                # IMPORTANT: this try/except must NEVER silently swallow failures.
+                # If usage is missing we log a WARNING so the operator knows money
+                # may have been spent without being tracked.  We don't crash the
+                # stream — the user already received the response — but the event
+                # is recorded so it can be investigated and reconciled.
+                try:
+                    final_msg = stream.get_final_message()
+                    u = final_msg.usage
+                    call_cost = _budget.cost_usd(
+                        model=current_model,
+                        input_tokens=u.input_tokens,
+                        output_tokens=u.output_tokens,
+                        cache_read_tokens=getattr(u, "cache_read_input_tokens", 0) or 0,
+                        cache_write_tokens=getattr(u, "cache_creation_input_tokens", 0) or 0,
+                    )
+                    remaining_budget -= call_cost
+                    yield _sse({"cost_usd": round(call_cost, 6), "balance_usd": round(remaining_budget, 6)})
+                    logger.info(
+                        "chat_stream [%s] turn cost: $%.6f | model=%s | in=%d out=%d "
+                        "cache_read=%d cache_write=%d | balance: $%.4f",
+                        project_id, call_cost, current_model,
+                        u.input_tokens, u.output_tokens,
+                        getattr(u, "cache_read_input_tokens", 0) or 0,
+                        getattr(u, "cache_creation_input_tokens", 0) or 0,
+                        remaining_budget,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "chat_stream [%s]: usage unavailable after turn — cost NOT tracked. "
+                        "model=%s reason=%s",
+                        project_id, current_model, exc,
+                    )
 
         # Parse tool_use blocks from collected content
         for block in collected_content_blocks:

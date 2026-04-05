@@ -33,7 +33,8 @@ class Settings(BaseSettings):
 
     # ── LLM API keys (set in .env on the server — users never see these) ──────
     anthropic_api_key: str = ""
-    llm_provider: str = "anthropic"  # default provider
+    deepseek_api_key: str = ""
+    llm_provider: str = "anthropic"  # default provider: "anthropic" | "deepseek"
     llm_model: str = ""              # empty = use provider default
 
     # ── PostgreSQL ─────────────────────────────────────────────────────────────
@@ -69,6 +70,11 @@ class Settings(BaseSettings):
     # Default is False — regex parser is always used, tree-sitter is comparison-only.
     # When enabling, run a full scan to rebuild the graph with improved accuracy.
     use_tree_sitter_java: bool = False
+
+    # ── Hypothesis engine (experimental) ────────────────────────────────────────
+    # Set HYPOTHESIS_MODE_ENABLED=true to use hypothesis-driven exploration
+    # Default is False — uses legacy agent-based exploration
+    hypothesis_mode_enabled: bool = False
 
 
 settings = Settings()

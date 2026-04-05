@@ -67,6 +67,39 @@ _ANNOTATION_MAP: dict[str, tuple[str, float]] = {
     # FastAPI (Python — not annotations but decorator patterns, handled separately)
 }
 
+# Maps superclass name patterns → (role, confidence).
+# Used when a class explicitly extends a known base class.
+_SUPERCLASS_ROLE_MAP: list[tuple[str, str, float]] = [
+    # Java/Kotlin
+    ("BaseController", "Controller", 0.95),
+    ("AbstractController", "Controller", 0.95),
+    ("RestController", "Controller", 0.95),
+    ("BaseService", "Service", 0.95),
+    ("AbstractService", "Service", 0.95),
+    ("BaseRepository", "Repository", 0.95),
+    ("JpaRepository", "Repository", 0.95),
+    ("CrudRepository", "Repository", 0.95),
+    ("AbstractEntity", "Entity", 0.95),
+    ("BaseEntity", "Entity", 0.95),
+    # Python
+    ("APIView", "Controller", 0.95),
+    ("ViewSet", "Controller", 0.95),
+    ("GenericAPIView", "Controller", 0.95),
+    ("Model", "Entity", 0.95),
+    ("BaseModel", "Entity", 0.95),
+    ("Serializer", "DTO", 0.90),
+    # TypeScript
+    ("Component", "View", 0.90),
+    ("React.Component", "View", 0.90),
+]
+
+def _classify_by_superclass(superclass: str) -> tuple[str, float] | None:
+    """Return (role, confidence) if superclass matches a known base class pattern."""
+    for pattern, role, confidence in _SUPERCLASS_ROLE_MAP:
+        if pattern in superclass:  # substring match for patterns like "React.Component"
+            return role, confidence
+    return None
+
 # Java/Kotlin: class-level annotations appear as @Foo or @Foo(...)
 _JAVA_ANNOTATION_RE = re.compile(
     r"@(" + "|".join(re.escape(k) for k in _ANNOTATION_MAP) + r")\b",
@@ -218,20 +251,49 @@ def infer_role_heuristic(
     classes: Sequence[str],
     layer_hints: Sequence[str],
     imports: Sequence[str],
+    declared_role: str | None = None,
+    superclass: str | None = None,
 ) -> RoleResult:
     """Return a RoleResult using only local (per-file) signals.
 
-    Priority:
-      1a. Framework annotation/decorator (confidence 0.85–1.0)
-      1b. Folder path segment            (confidence 0.80–0.85)
-      1c. Class / file-stem name suffix  (confidence 0.65–0.75)
-      1d. Parser layer_hints             (confidence 0.70)
-      1e. Import-signal hints            (confidence 0.65)
-      fallback: "Util", confidence 0.40, ambiguity "high"
+    Priority (strict order):
+      1. Declared role from unambiguous annotation (confidence 1.0)
+      2. Superclass inheritance pattern (confidence 0.95)
+      3. Framework annotation/decorator detection (confidence 0.85–1.0)
+      4. Folder path segment            (confidence 0.80–0.85)
+      5. Class / file-stem name suffix  (confidence 0.65–0.75)
+      6. Parser layer_hints             (confidence 0.70)
+      7. Import-signal hints            (confidence 0.65)
+      fallback: "Unknown", confidence 0.0, ambiguity "high"
     """
     ext = Path(file_path).suffix
 
-    # ── 1a: Annotation ────────────────────────────────────────────────────────
+    # ── 1: Declared role from annotation extraction ───────────────────────────
+    if declared_role:
+        # declared_role is lowercase (e.g., "controller", "service")
+        role = declared_role.title()  # "controller" -> "Controller"
+        return RoleResult(
+            role=role,
+            confidence=1.0,
+            source="annotation",
+            ambiguity="none",
+            reasoning=f"Unambiguous annotation declares role={role!r} (confidence=1.0).",
+        )
+
+    # ── 2: Superclass inheritance ─────────────────────────────────────────────
+    if superclass:
+        sc_hit = _classify_by_superclass(superclass)
+        if sc_hit:
+            role, conf = sc_hit
+            return RoleResult(
+                role=role,
+                confidence=conf,
+                source="inheritance",
+                ambiguity="none",
+                reasoning=f"Extends known base class {superclass!r} → role={role!r} (confidence={conf:.2f}).",
+            )
+
+    # ── 3: Annotation detection (regex scan) ──────────────────────────────────
     ann = _detect_annotations(file_path, ext)
     if ann:
         role, conf = ann
@@ -243,7 +305,7 @@ def infer_role_heuristic(
             reasoning=f"Framework annotation/decorator declares role={role} (confidence={conf:.2f}).",
         )
 
-    # ── 1b: Path ──────────────────────────────────────────────────────────────
+    # ── 4: Path ──────────────────────────────────────────────────────────────
     path_hit = _classify_by_path(file_path)
     if path_hit:
         role, conf = path_hit
@@ -255,7 +317,7 @@ def infer_role_heuristic(
             reasoning=f"File path segment matches {role!r} convention (confidence={conf:.2f}).",
         )
 
-    # ── 1c: Class-name suffix (prefer first class, then file stem) ────────────
+    # ── 5: Class-name suffix (prefer first class, then file stem) ────────────
     name_hit: tuple[str, float] | None = None
     name_source = ""
     for cls in classes:
@@ -279,10 +341,10 @@ def infer_role_heuristic(
             source="name_suffix",
             ambiguity=ambiguity,
             reasoning=f"{name_source} suffix infers role={role!r} (confidence={conf:.2f}). "
-                      "No annotation or path signal to confirm.",
+                      "No annotation, inheritance, or path signal to confirm.",
         )
 
-    # ── 1d: Parser layer_hints (React JSX, Express routes, etc.) ─────────────
+    # ── 6: Parser layer_hints (React JSX, Express routes, etc.) ─────────────
     if layer_hints:
         hint_role = layer_hints[0]
         return RoleResult(
@@ -291,10 +353,10 @@ def infer_role_heuristic(
             source="content",
             ambiguity="low",
             reasoning=f"Parser detected content pattern implying role={hint_role!r} "
-                      "(confidence=0.70, no annotation or path match).",
+                      "(confidence=0.70, no annotation, inheritance, path, or name match).",
         )
 
-    # ── 1e: Import signal ─────────────────────────────────────────────────────
+    # ── 7: Import signal ─────────────────────────────────────────────────────
     imp_hit = _classify_by_imports(imports)
     if imp_hit:
         role, conf = imp_hit
@@ -309,11 +371,11 @@ def infer_role_heuristic(
 
     # ── fallback ──────────────────────────────────────────────────────────────
     return RoleResult(
-        role="Util",
-        confidence=0.40,
+        role="Unknown",
+        confidence=0.0,
         source="default",
         ambiguity="high",
-        reasoning="No annotation, path, name, or content signal matched. Defaulting to Util.",
+        reasoning="No annotation, inheritance, path, name, or content signal matched. Defaulting to Unknown.",
     )
 
 

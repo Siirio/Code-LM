@@ -299,6 +299,8 @@ body {
   padding: 10px 14px;
   border-radius: 4px;
   line-height: 1.6;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
 
 .message-user {
@@ -1728,3 +1730,27 @@ body {
   transition: opacity 0.1s;
 }
 .scan-chip:hover .scan-chip-remove { opacity: 1; }
+
+/* ── Thinking Burst ─────────────────────────────────────────────────────── */
+.thinking-burst .thinking-particle {
+  animation: particleBurst 0.8s ease-out forwards;
+}
+
+@keyframes particleBurst {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) scale(1);
+  }
+  20% {
+    opacity: 1;
+    transform: translate(var(--tx, 0), var(--ty, -10px)) scale(1.2);
+  }
+  80% {
+    opacity: 0.7;
+    transform: translate(var(--tx, 0), var(--ty, -30px)) scale(0.8);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(var(--tx, 0), var(--ty, -40px)) scale(0.5);
+  }
+}

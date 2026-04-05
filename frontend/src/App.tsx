@@ -242,6 +242,7 @@ function FileTreePanel({ rootPath, onFileOpen, onRefresh, pushUndo, refreshSigna
   const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const selectedPathsRef = useRef<Set<string>>(new Set())
   const lastSelectedPathRef = useRef<string | null>(null)
+  const rightDragRef = useRef(false)
 
   // When #app-root has transform:scale(), position:fixed children are positioned
   // relative to that container, not the viewport. Divide clientX/Y by the scale
@@ -293,6 +294,7 @@ function FileTreePanel({ rootPath, onFileOpen, onRefresh, pushUndo, refreshSigna
       if (!dragSel) return
       const hadSelection = selectedPathsRef.current.size > 1
       setDragSel(null)
+      rightDragRef.current = false
       if (hadSelection) {
         const c = menuCoords(e.clientX, e.clientY)
         setBulkMenu({ x: c.x, y: c.y })
@@ -461,6 +463,14 @@ function FileTreePanel({ rootPath, onFileOpen, onRefresh, pushUndo, refreshSigna
     }
   }
 
+  function handleRightClick(e: React.MouseEvent, path: string, isDir: boolean) {
+    if (e.button === 2 && (e.ctrlKey || e.shiftKey)) {
+      e.preventDefault()
+      e.stopPropagation()
+      handleItemClick(e, path, isDir)
+    }
+  }
+
   function renderNode(node: TreeNode, depth: number): React.ReactNode {
     const isOpen = expanded.has(node.path)
     const indent = depth * 14
@@ -477,7 +487,9 @@ function FileTreePanel({ rootPath, onFileOpen, onRefresh, pushUndo, refreshSigna
             className={`tree-item tree-dir${selectedPaths.has(node.path) ? ' tree-item-selected' : ''}`}
             style={{ paddingLeft: `${8 + indent}px` }}
             onClick={e => handleItemClick(e, node.path, true)}
+            onMouseDown={e => handleRightClick(e, node.path, true)}
             onContextMenu={e => {
+              if (rightDragRef.current || e.ctrlKey || e.shiftKey) return
               e.preventDefault()
               e.stopPropagation()
               const c = menuCoords(e.clientX, e.clientY)
@@ -512,10 +524,13 @@ function FileTreePanel({ rootPath, onFileOpen, onRefresh, pushUndo, refreshSigna
         style={{ paddingLeft: `${8 + indent}px` }}
         title={node.path}
         onClick={e => handleItemClick(e, node.path, false)}
+        onMouseDown={e => handleRightClick(e, node.path, false)}
         onContextMenu={e => {
+          if (rightDragRef.current || e.ctrlKey || e.shiftKey) return
           e.preventDefault()
           e.stopPropagation()
-          setCtxMenu({ x: e.clientX, y: e.clientY, node })
+          const c = menuCoords(e.clientX, e.clientY)
+          setCtxMenu({ x: c.x, y: c.y, node })
         }}
       >
         <span className="tree-icon-file">{icon}</span>
@@ -556,7 +571,10 @@ function FileTreePanel({ rootPath, onFileOpen, onRefresh, pushUndo, refreshSigna
         ref={treeBodyRef}
         style={{ position: 'relative' }}
         onMouseDown={e => {
-          if ((e.target as Element).closest('.tree-item')) return
+          if (e.button === 0 && (e.target as Element).closest('.tree-item')) return
+          if (e.button !== 0 && e.button !== 2) return
+          e.preventDefault()
+          if (e.button === 2) rightDragRef.current = true
           const rect = treeBodyRef.current!.getBoundingClientRect()
           setDragSel({ x1: e.clientX - rect.left, y1: e.clientY - rect.top, x2: e.clientX - rect.left, y2: e.clientY - rect.top })
           setSelectedPaths(new Set())
@@ -711,6 +729,11 @@ const THINKING_VERBS = [
 function ThinkingIndicator({ agent, tool }: { agent?: string; tool?: string }) {
   const [verbIdx, setVerbIdx] = useState(0)
   const [dotCount, setDotCount] = useState(1)
+  const [displayedVerb, setDisplayedVerb] = useState('')
+  const [isTyping, setIsTyping] = useState(false)
+  const [currentVerb, setCurrentVerb] = useState(THINKING_VERBS[0])
+  const [burst, setBurst] = useState(false)
+  const particleOffsets = useRef<Array<{tx: number, ty: number}>>([])
 
   useEffect(() => {
     const verbTimer = setInterval(() => {
@@ -722,9 +745,42 @@ function ThinkingIndicator({ agent, tool }: { agent?: string; tool?: string }) {
     return () => { clearInterval(verbTimer); clearInterval(dotTimer) }
   }, [])
 
-  const verb = tool
-    ? `Querying ${tool}`
-    : THINKING_VERBS[verbIdx]
+  // Generate random offsets for particles
+  useEffect(() => {
+    particleOffsets.current = Array.from({ length: 5 }).map(() => ({
+      tx: (Math.random() - 0.5) * 30,
+      ty: -10 - Math.random() * 20
+    }))
+  }, [])
+
+  // When verbIdx changes, start typing animation for the new verb
+  useEffect(() => {
+    const newVerb = tool ? `Querying ${tool}` : THINKING_VERBS[verbIdx]
+    if (newVerb === currentVerb) return
+
+    setIsTyping(true)
+    setCurrentVerb(newVerb)
+    setDisplayedVerb('')
+
+    let i = 0
+    const interval = setInterval(() => {
+      setDisplayedVerb(newVerb.slice(0, i + 1))
+      i++
+      if (i >= newVerb.length) {
+        clearInterval(interval)
+        setIsTyping(false)
+        setBurst(true)
+        setTimeout(() => setBurst(false), 800)
+      }
+    }, 80) // typing speed
+
+    return () => clearInterval(interval)
+  }, [verbIdx, tool, currentVerb])
+
+  // If tool changes, we need to update current verb immediately (no typing?)
+  // For now, treat tool as immediate.
+
+  const verb = tool ? `Querying ${tool}` : displayedVerb || currentVerb
   const dots = '.'.repeat(dotCount)
   const label = agent && agent !== 'main' ? `[${agent}] ` : ''
 
@@ -733,9 +789,19 @@ function ThinkingIndicator({ agent, tool }: { agent?: string; tool?: string }) {
       <span className="thinking-agent">{label}</span>
       <span className="thinking-verb">{verb}</span>
       <span className="thinking-dots">{dots}</span>
-      <span className="thinking-particles" aria-hidden="true">
+      <span className={`thinking-particles ${burst ? 'thinking-burst' : ''}`} aria-hidden="true">
         {Array.from({ length: 5 }).map((_, i) => (
-          <span key={i} className="thinking-particle" style={{ animationDelay: `${i * 0.18}s` }} />
+          <span
+            key={i}
+            className="thinking-particle"
+            style={{
+              animationDelay: `${i * 0.18}s`,
+              ...(burst ? {
+                '--tx': `${particleOffsets.current[i]?.tx || 0}px`,
+                '--ty': `${particleOffsets.current[i]?.ty || -10}px`
+              } : {})
+            }}
+          />
         ))}
       </span>
     </div>
@@ -769,6 +835,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
   const [showSettings, setShowSettings] = useState(false)
   const [settingsTab, setSettingsTab] = useState<'general' | 'project' | 'account'>('general')
   const [settingsApiKey, setSettingsApiKey] = useState('')
+  const [settingsProvider, setSettingsProvider] = useState<'anthropic' | 'deepseek'>('anthropic')
   const [settingsAccountTab, setSettingsAccountTab] = useState<'key' | 'credits'>('credits')
   const [clearKnowledgeConfirm, setClearKnowledgeConfirm] = useState(false)
   const [clearKnowledgeLoading, setClearKnowledgeLoading] = useState(false)
@@ -886,10 +953,11 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
         setLeftWidth(Math.max(120, Math.min(600, dragStartW.current + delta)))
       }
       if (isDraggingMid.current) {
-        const chatMinPx = Math.floor(window.innerWidth * 0.20 / s)
-        const maxMid = window.innerWidth / s - leftWidth - chatMinPx - 8
-        const delta = (e.clientX - dragStartX.current) / s
-        setMidWidth(Math.max(200, Math.min(maxMid, dragStartW.current + delta)))
+        const available = window.innerWidth / s - leftWidth - 8;
+        const chatMinPx = Math.max(320, Math.floor(available * 0.35));
+        const maxMid = available - chatMinPx;
+        const delta = (e.clientX - dragStartX.current) / s;
+        setMidWidth(Math.max(200, Math.min(maxMid, dragStartW.current + delta)));
       }
       if (isDraggingTerm.current) {
         // Terminal uses a counter-zoom wrapper so its logical pixels = viewport pixels.
@@ -916,10 +984,10 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
     function onWheel(e: WheelEvent) {
       if (!e.ctrlKey) return
       const t = e.target as Element
-      const zoomIn = e.deltaY < 0
       if (leftPanelRef.current?.contains(t)) {
         e.preventDefault()
-        setLeftZoom(z => Math.round(Math.max(0.5, Math.min(2.0, z + (zoomIn ? 0.1 : -0.1))) * 10) / 10)
+        const delta = e.deltaY < 0 ? 10 : -10
+        setLeftWidth(w => Math.max(120, Math.min(600, w + delta)))
       }
     }
     window.addEventListener('wheel', onWheel, { passive: false })
@@ -980,6 +1048,16 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [])
+
+  // Constrain middle panel width when left panel or file content changes
+  useEffect(() => {
+    if (!openFile) return;
+    const s = uiScaleRef.current;
+    const available = window.innerWidth / s - leftWidth - 8;
+    const chatMinPx = Math.max(320, Math.floor(available * 0.35));
+    const maxMid = available - chatMinPx;
+    setMidWidth(w => Math.max(200, Math.min(maxMid, w)));
+  }, [openFile, leftWidth]);
 
   async function checkBackend(attempt = 0) {
     try {
@@ -1363,6 +1441,16 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
     setMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'system', content }])
   }
 
+  // ── Wheel zoom for file tree ──────────────────────────────────────────────
+  function handleLeftPanelWheel(e: React.WheelEvent) {
+    if (e.ctrlKey) {
+      e.preventDefault()
+      e.stopPropagation()
+      const delta = e.deltaY > 0 ? -0.1 : 0.1
+      setLeftZoom(z => Math.max(0.5, Math.min(2.0, z + delta)))
+    }
+  }
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
@@ -1373,6 +1461,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
           className="left-panel"
           ref={leftPanelRef}
           style={{ width: leftWidth, flexShrink: 0 }}
+          onWheel={handleLeftPanelWheel}
         >
           <div className="sidebar-header">
             <span className="logo">Code LM</span>
@@ -1479,7 +1568,7 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
             <div className="toolbar-title">{projectName}</div>
             <div className="toolbar-actions">
               {auth?.apiKey ? (
-                <div className="auth-indicator" onClick={() => { setSettingsApiKey(auth.apiKey || ''); setSettingsAccountTab('key'); setSettingsTab('account'); setShowSettings(true) }} title="API Key connected">
+                <div className="auth-indicator" onClick={() => { setSettingsApiKey(auth.apiKey || ''); setSettingsProvider(auth.provider || 'anthropic'); setSettingsAccountTab('key'); setSettingsTab('account'); setShowSettings(true) }} title="API Key connected">
                   <span className="auth-dot connected" />
                   <span className="auth-label">My Key</span>
                 </div>
@@ -1727,25 +1816,46 @@ function IDE({ projectId, rootPath }: { projectId: string; rootPath: string }) {
                   </div>
                   {settingsAccountTab === 'key' && (
                     <>
+                      <div className="auth-tabs" style={{ marginBottom: '12px' }}>
+                        <button
+                          className={`auth-tab ${settingsProvider === 'anthropic' ? 'active' : ''}`}
+                          onClick={() => setSettingsProvider('anthropic')}
+                        >Anthropic (Claude)</button>
+                        <button
+                          className={`auth-tab ${settingsProvider === 'deepseek' ? 'active' : ''}`}
+                          onClick={() => setSettingsProvider('deepseek')}
+                        >DeepSeek</button>
+                      </div>
                       <p style={{ fontSize: '12px', color: 'var(--text-dim)', marginBottom: '16px' }}>
-                        Use your own Anthropic (Claude) API key. No credits needed.
+                        {settingsProvider === 'anthropic'
+                          ? 'Use your own Anthropic (Claude) API key. No credits needed.'
+                          : 'Use your own DeepSeek API key. No credits needed.'}
                       </p>
                       <input
                         type="password"
                         className="auth-input"
-                        placeholder="sk-ant-..."
+                        placeholder={settingsProvider === 'anthropic' ? 'sk-ant-...' : 'sk-...'}
                         value={settingsApiKey}
                         onChange={e => setSettingsApiKey(e.target.value)}
                         autoFocus
                       />
-                      <a className="auth-link" href="https://console.anthropic.com" target="_blank" rel="noopener noreferrer">
-                        Get your Anthropic API key &rarr;
-                      </a>
+                      {settingsProvider === 'anthropic' ? (
+                        <a className="auth-link" href="https://console.anthropic.com" target="_blank" rel="noopener noreferrer">
+                          Get your Anthropic API key &rarr;
+                        </a>
+                      ) : (
+                        <a className="auth-link" href="https://platform.deepseek.com" target="_blank" rel="noopener noreferrer">
+                          Get your DeepSeek API key &rarr;
+                        </a>
+                      )}
                       <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
                         <button
                           className="auth-connect-btn"
                           disabled={!settingsApiKey.trim()}
-                          onClick={() => { const cfg = { apiKey: settingsApiKey.trim() }; saveAuth(cfg); setAuth(cfg) }}
+                          onClick={() => {
+                            const cfg = { apiKey: settingsApiKey.trim(), provider: settingsProvider }
+                            saveAuth(cfg); setAuth(cfg)
+                          }}
                         >
                           {auth?.apiKey ? 'Update Key' : 'Connect'}
                         </button>

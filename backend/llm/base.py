@@ -33,3 +33,11 @@ class LLMProvider(ABC):
     ) -> LLMResponse:
         """Send a chat turn and return the response."""
         ...
+
+    def assistant_message(self, response: LLMResponse) -> dict:
+        """Build an assistant history entry (in Anthropic-canonical format) from a response.
+
+        Providers override this to preserve tool call structure in the message history.
+        Default: plain text only (loses tool call info — always override when tools are used).
+        """
+        return {"role": "assistant", "content": response.reply or ""}

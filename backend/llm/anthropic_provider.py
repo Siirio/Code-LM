@@ -49,6 +49,12 @@ class AnthropicProvider(LLMProvider):
             "content": content,
         }
 
-    def assistant_message_from_raw(self, raw_response) -> dict:
-        """Convert a raw Anthropic response to a history message."""
-        return {"role": "assistant", "content": raw_response.content}
+    def assistant_message(self, response: LLMResponse) -> dict:
+        """Build an Anthropic-format assistant history entry, preserving tool call blocks."""
+        if response.raw is not None and hasattr(response.raw, "content"):
+            content = [
+                block.model_dump() if hasattr(block, "model_dump") else block
+                for block in response.raw.content
+            ]
+            return {"role": "assistant", "content": content}
+        return {"role": "assistant", "content": response.reply or ""}

@@ -444,6 +444,95 @@ _RESOLVERS = {
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Calls resolver
+# ═══════════════════════════════════════════════════════════════════════════
+
+def resolve_calls(parsed_files: list[dict]) -> list[dict]:
+    """Extract call edges from parsed files.
+
+    Returns list of call edge dicts with keys:
+        from_class: str          # caller class name
+        to_function: str         # callee method name
+        target_obj: str | None   # object the method is called on (if known)
+        file_path: str           # file where call occurs
+        line: int | None         # line number
+    """
+    call_edges: list[dict] = []
+
+    for pf in parsed_files:
+        file_path = pf["file_path"]
+        calls = pf.get("calls", [])
+        if not calls:
+            continue
+
+        # Get classes defined in this file
+        classes = pf.get("classes", [])
+        if not classes:
+            # No class in file, skip calls (they need a caller class)
+            continue
+
+        for call in calls:
+            caller = call.get("caller")
+            callee = call.get("callee")
+            target_obj = call.get("target_obj")
+            line = call.get("line")
+
+            if not caller or not callee:
+                continue
+
+            # Ensure caller is one of the classes in this file
+            if caller not in classes:
+                # Caller might be a class from another file; we can't verify.
+                # Still create edge, but note that caller class node may not exist.
+                pass
+
+            call_edges.append({
+                "from_class": caller,
+                "to_function": callee,
+                "target_obj": target_obj,
+                "file_path": file_path,
+                "line": line,
+            })
+
+    return call_edges
+
+
+def resolve_extends(parsed_files: list[dict]) -> list[dict]:
+    """Extract extends/implements edges from parsed files.
+
+    Returns list of extends edge dicts with keys:
+        from_class: str          # subclass class name
+        to_class: str            # superclass name
+        file_path: str           # file where subclass is defined
+    """
+    extends_edges: list[dict] = []
+
+    for pf in parsed_files:
+        file_path = pf["file_path"]
+        classes = pf.get("classes", [])
+        if not classes:
+            continue
+
+        # Get superclass from parsed file (stored as "_superclass")
+        superclass = pf.get("_superclass")
+        if not superclass:
+            continue
+
+        # For each class in file, assume first class is the one with the superclass?
+        # In most languages, only the first class has explicit superclass.
+        # We'll associate superclass with the first class in the file.
+        subclass = classes[0]
+
+        extends_edges.append({
+            "from_class": subclass,
+            "to_class": superclass,
+            "file_path": file_path,
+        })
+
+    return extends_edges
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Neo4j edge writer
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -532,6 +621,78 @@ async def _write_contains_batch(
     return written
 
 
+async def _write_calls_batch(
+    neo4j: "Neo4jClient",
+    project_id: str,
+    call_edges: list[dict],
+) -> int:
+    """Write CALLS edges (Class->Function) via UNWIND.  Returns count written."""
+    if not call_edges:
+        return 0
+
+    written = 0
+    for i in range(0, len(call_edges), BATCH_SIZE):
+        batch = call_edges[i : i + BATCH_SIZE]
+        params = {
+            "project_id": project_id,
+            "edges": [
+                {
+                    "from_class": e["from_class"],
+                    "to_function": e["to_function"],
+                    "target_obj": e.get("target_obj"),
+                    "file_path": e["file_path"],
+                    "line": e.get("line"),
+                }
+                for e in batch
+            ],
+        }
+        cypher = (
+            "UNWIND $edges AS e "
+            "MERGE (c:Class {name: e.from_class, project_id: $project_id}) "
+            "MERGE (f:Function {name: e.to_function, file_path: e.file_path, project_id: $project_id}) "
+            "MERGE (c)-[r:CALLS {target_obj: e.target_obj, line: e.line}]->(f)"
+        )
+        await neo4j.execute(cypher, params)
+        written += len(batch)
+
+    return written
+
+
+async def _write_extends_batch(
+    neo4j: "Neo4jClient",
+    project_id: str,
+    extends_edges: list[dict],
+) -> int:
+    """Write EXTENDS edges (Class->Class) via UNWIND.  Returns count written."""
+    if not extends_edges:
+        return 0
+
+    written = 0
+    for i in range(0, len(extends_edges), BATCH_SIZE):
+        batch = extends_edges[i : i + BATCH_SIZE]
+        params = {
+            "project_id": project_id,
+            "edges": [
+                {
+                    "from_class": e["from_class"],
+                    "to_class": e["to_class"],
+                    "file_path": e["file_path"],
+                }
+                for e in batch
+            ],
+        }
+        cypher = (
+            "UNWIND $edges AS e "
+            "MERGE (c:Class {name: e.from_class, project_id: $project_id}) "
+            "MERGE (s:Class {name: e.to_class, project_id: $project_id}) "
+            "MERGE (c)-[:EXTENDS {file: e.file_path}]->(s)"
+        )
+        await neo4j.execute(cypher, params)
+        written += len(batch)
+
+    return written
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Public entry point — called from scan_project()
 # ═══════════════════════════════════════════════════════════════════════════
@@ -541,10 +702,10 @@ async def resolve_and_write_edges(
     project_root: str,
     parsed_files: list[dict],
     neo4j: "Neo4jClient",
-) -> tuple[int, int]:
+) -> tuple[int, int, int, int]:
     """Resolve all imports across parsed files and write edges to Neo4j.
 
-    Returns (imports_written, contains_written).
+    Returns (imports_written, contains_written, calls_written, extends_written).
     """
     all_edges: list[dict] = []
 
@@ -567,6 +728,8 @@ async def resolve_and_write_edges(
 
     imports_written = 0
     contains_written = 0
+    calls_written = 0
+    extends_written = 0
 
     try:
         imports_written = await _write_imports_batch(neo4j, project_id, all_edges)
@@ -584,9 +747,29 @@ async def resolve_and_write_edges(
             project_id, exc_info=True,
         )
 
+    # Resolve and write CALLS edges
+    try:
+        call_edges = resolve_calls(parsed_files)
+        calls_written = await _write_calls_batch(neo4j, project_id, call_edges)
+    except Exception:
+        logger.warning(
+            "Scan [%s]: failed to write CALLS edges to Neo4j",
+            project_id, exc_info=True,
+        )
+
+    # Resolve and write EXTENDS edges
+    try:
+        extends_edges = resolve_extends(parsed_files)
+        extends_written = await _write_extends_batch(neo4j, project_id, extends_edges)
+    except Exception:
+        logger.warning(
+            "Scan [%s]: failed to write EXTENDS edges to Neo4j",
+            project_id, exc_info=True,
+        )
+
     logger.info(
-        "Scan [%s]: wrote %d IMPORTS edges, %d CONTAINS edges",
-        project_id, imports_written, contains_written,
+        "Scan [%s]: wrote %d IMPORTS edges, %d CONTAINS edges, %d CALLS edges, %d EXTENDS edges",
+        project_id, imports_written, contains_written, calls_written, extends_written,
     )
 
-    return imports_written, contains_written
+    return imports_written, contains_written, calls_written, extends_written

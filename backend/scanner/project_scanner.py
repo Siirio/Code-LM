@@ -161,9 +161,20 @@ def _parse_python_file(file_path: str) -> dict:
     tree = ast.parse(source, filename=file_path)
     classes, functions, imports = [], [], []
     imports_detailed: list[dict] = []
+    calls: list[dict] = []
+
+    # Track current class during traversal
+    current_class = None
+    class_stack = []
+
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef):
             classes.append(node.name)
+            # Note: ast.walk doesn't preserve hierarchy, so we can't reliably track
+            # which class we're inside. We'll use a simple heuristic: assume calls
+            # found anywhere in the file belong to the first class (if any).
+            # For proper tracking we'd need NodeVisitor, but keeping simple for now.
+            pass
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             functions.append(node.name)
         elif isinstance(node, ast.Import):
@@ -184,8 +195,31 @@ def _parse_python_file(file_path: str) -> dict:
                     "module": node.module,
                     "names": names,
                 })
-    return {"classes": classes, "functions": functions, "imports": imports,
-            "imports_detailed": imports_detailed}
+        elif isinstance(node, ast.Call):
+            # Simple call detection: obj.method()
+            if isinstance(node.func, ast.Attribute):
+                callee = node.func.attr
+                # Determine caller class: use first class in file as fallback
+                caller = classes[0] if classes else None
+                if caller:
+                    # Try to get target object name
+                    target_obj = None
+                    if isinstance(node.func.value, ast.Name):
+                        target_obj = node.func.value.id
+                    calls.append({
+                        "caller": caller,
+                        "callee": callee,
+                        "target_obj": target_obj,
+                        "line": node.lineno if hasattr(node, 'lineno') else None,
+                    })
+
+    return {
+        "classes": classes,
+        "functions": functions,
+        "imports": imports,
+        "imports_detailed": imports_detailed,
+        "calls": calls,
+    }
 
 
 _TS_JS_EXTENSIONS: set[str] = {".ts", ".tsx", ".js", ".jsx"}
@@ -360,7 +394,27 @@ def _parse_java_file(file_path: str, project_id: str | None = None) -> dict:
     for m in re.finditer(r'^\s*import\s+(?:static\s+)?([\w.]+)\s*;', source, re.MULTILINE):
         imports.append(m.group(1))
 
-    regex_result = {"classes": classes, "functions": functions, "imports": imports, "package": package}
+    # Simple method call detection: object.method()
+    calls = []
+    if classes:
+        caller = classes[0]  # associate calls with first class in file
+        for m in re.finditer(r'\b([a-zA-Z_$][a-zA-Z0-9_$]*)\.([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(', source_no_comments):
+            obj = m.group(1)
+            method = m.group(2)
+            # Filter out common noise: System.out, etc.
+            if obj.lower() in ('system', 'out', 'err', 'class', 'this', 'super'):
+                continue
+            # Skip calls where object starts with uppercase (likely class name)
+            if obj and obj[0].isupper():
+                continue
+            calls.append({
+                "caller": caller,
+                "callee": method,
+                "target_obj": obj,
+                "line": None,  # line number not available from regex
+            })
+
+    regex_result = {"classes": classes, "functions": functions, "imports": imports, "package": package, "calls": calls}
 
     # ── STEP 2: Feature-flag gate ─────────────────────────────────────────────
     if not settings.use_tree_sitter_java:
@@ -378,6 +432,7 @@ def _parse_java_file(file_path: str, project_id: str | None = None) -> dict:
     try:
         from scanner.java_treesitter import _parse_java_treesitter
         ts_result = _parse_java_treesitter(file_path)
+        ts_result.setdefault("calls", [])
     except Exception as exc:
         logger.error(
             "[Java Parse] tree-sitter failed for %s: %s — falling back to regex",
@@ -496,7 +551,27 @@ def _parse_kotlin_file(file_path: str) -> dict:
     for m in re.finditer(r'^\s*import\s+([\w.]+)', source, re.MULTILINE):
         imports.append(m.group(1))
 
-    return {"classes": classes, "functions": functions, "imports": imports, "package": package}
+    # Simple method call detection: object.method()
+    calls = []
+    if classes:
+        caller = classes[0]  # associate calls with first class in file
+        for m in re.finditer(r'\b([a-zA-Z_$][a-zA-Z0-9_$]*)\.([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(', source_no_comments):
+            obj = m.group(1)
+            method = m.group(2)
+            # Filter out common noise
+            if obj.lower() in ('this', 'super', 'system', 'out', 'err', 'class'):
+                continue
+            # Skip calls where object starts with uppercase (likely class name)
+            if obj and obj[0].isupper():
+                continue
+            calls.append({
+                "caller": caller,
+                "callee": method,
+                "target_obj": obj,
+                "line": None,  # line number not available from regex
+            })
+
+    return {"classes": classes, "functions": functions, "imports": imports, "package": package, "calls": calls}
 
 
 def _parse_go_file(file_path: str) -> dict:
@@ -545,7 +620,24 @@ def _parse_go_file(file_path: str) -> dict:
             if pkg not in imports:
                 imports.append(pkg)
 
-    return {"classes": classes, "functions": functions, "imports": imports, "package": package}
+    # Simple method/function call detection: obj.Method() or pkg.Function()
+    calls = []
+    if classes:
+        caller = classes[0]  # associate calls with first type in file
+        for m in re.finditer(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\.([A-Z][a-zA-Z0-9_]*)\s*\(', source_no_comments):
+            obj = m.group(1)
+            method = m.group(2)
+            # Filter out common noise
+            if obj.lower() in ('fmt', 'os', 'io', 'log', 'http', 'json'):
+                continue
+            calls.append({
+                "caller": caller,
+                "callee": method,
+                "target_obj": obj,
+                "line": None,  # line number not available from regex
+            })
+
+    return {"classes": classes, "functions": functions, "imports": imports, "package": package, "calls": calls}
 
 
 def _classify_layer_from_path(file_path: str) -> str | None:
@@ -700,12 +792,34 @@ def _parse_ts_js_file(file_path: str) -> dict:
     if has_hooks and "View" not in layer_hints:
         layer_hints.append("View")
 
+    # --- Simple method call detection: object.method() ---
+    calls = []
+    if classes:
+        caller = classes[0]  # associate calls with first class in file
+        # Simple pattern for obj.method() - ignore chained calls
+        for m in re.finditer(r'\b([a-zA-Z_$][a-zA-Z0-9_$]*)\.([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(', source):
+            obj = m.group(1)
+            method = m.group(2)
+            # Filter out common noise
+            if obj.lower() in ('this', 'super', 'window', 'document', 'console', 'localstorage', 'sessionstorage'):
+                continue
+            # Skip calls where object starts with uppercase (likely class name)
+            if obj and obj[0].isupper():
+                continue
+            calls.append({
+                "caller": caller,
+                "callee": method,
+                "target_obj": obj,
+                "line": None,  # line number not available from regex
+            })
+
     return {
         "classes": classes,
         "functions": functions,
         "imports": imports,
         "imports_detailed": imports_detailed,
         "layer_hints": layer_hints,
+        "calls": calls,
     }
 
 
@@ -858,6 +972,7 @@ _ROLE_DISPLAY: dict[str, str] = {
     "DTO":        "dto",
     "View":       "view",
     "Component":  "component",
+    "Unknown":    "unclassified",
 }
 
 
@@ -1730,11 +1845,17 @@ async def _scan_project_impl(
         # Uses annotations, path, class-name suffix, content signals.
         # Tier 2 (import-graph refinement) runs after all files are parsed.
         layer_hints: list[str] = parsed.get("layer_hints", [])
+        # Extract annotations, superclass, declared_role once (reads first 8 KB)
+        ext = Path(fpath).suffix
+        file_annotations, file_superclass, file_declared_role = \
+            extract_annotations_and_superclass(fpath, ext)
         role_result: RoleResult = infer_role_heuristic(
             file_path=fpath,
             classes=parsed["classes"],
             layer_hints=layer_hints,
             imports=parsed.get("imports", []),
+            declared_role=file_declared_role,
+            superclass=file_superclass,
         )
         layer = role_result.role
 
@@ -1748,7 +1869,11 @@ async def _scan_project_impl(
             "functions": parsed["functions"],
             "imports": parsed.get("imports", []),
             "imports_detailed": parsed.get("imports_detailed", []),
+            "calls": parsed.get("calls", []),
             "_role_result": role_result,
+            "_annotations": file_annotations,
+            "_superclass": file_superclass,
+            "_declared_role": file_declared_role,
         })
 
         # Neo4j write deferred to post-graph pass (after Tier 2 refinement).
@@ -1816,9 +1941,14 @@ async def _scan_project_impl(
             fpath = pf["file_path"]
             mod = pf.get("module", "_shared")
             ext = Path(fpath).suffix
-            # Extract raw annotations/superclass once per file (first 8 KB read)
-            file_annotations, file_superclass, file_declared_role = \
-                extract_annotations_and_superclass(fpath, ext)
+            # Use pre-extracted annotations/superclass/declared_role (saved during role inference)
+            file_annotations = pf.get("_annotations", [])
+            file_superclass = pf.get("_superclass")
+            file_declared_role = pf.get("_declared_role")
+            if file_annotations is None or file_superclass is None or file_declared_role is None:
+                # Fallback for compatibility (should not happen)
+                file_annotations, file_superclass, file_declared_role = \
+                    extract_annotations_and_superclass(fpath, ext)
             for class_name in pf["classes"]:
                 try:
                     await _write_class_to_neo4j(
@@ -1837,9 +1967,13 @@ async def _scan_project_impl(
                     )
 
     # --- IMPORTS / CONTAINS edges ---
+    edges_imports = 0
+    edges_contains = 0
+    edges_calls = 0
+    edges_extends = 0
     if neo4j_available and parsed_files:
         try:
-            await resolve_and_write_edges(project_id, root_path, parsed_files, neo4j_client)
+            edges_imports, edges_contains, edges_calls, edges_extends = await resolve_and_write_edges(project_id, root_path, parsed_files, neo4j_client)
         except Exception:
             logger.warning(
                 "Scan [%s]: resolve_and_write_edges failed — continuing",
@@ -1852,6 +1986,7 @@ async def _scan_project_impl(
             # Build per-module stats for Module node properties
             mod_role_counts: dict[str, dict[str, int]] = {}
             mod_class_counts: dict[str, int] = {}
+            mod_role_examples: dict[str, dict[str, list[str]]] = {}
             for pf in parsed_files:
                 mod = pf.get("module", "_shared")
                 role = _ROLE_DISPLAY.get(pf.get("layer") or "Util", "unclassified")
@@ -1859,6 +1994,19 @@ async def _scan_project_impl(
                 if mod not in mod_role_counts:
                     mod_role_counts[mod] = {}
                 mod_role_counts[mod][role] = mod_role_counts[mod].get(role, 0) + len(pf["classes"])
+
+                # Collect example class names (up to 3 per role per module)
+                if mod not in mod_role_examples:
+                    mod_role_examples[mod] = {}
+                if role not in mod_role_examples[mod]:
+                    mod_role_examples[mod][role] = []
+                current_list = mod_role_examples[mod][role]
+                # Add class names from this file, but limit total to 3
+                for cls in pf["classes"]:
+                    if cls not in current_list:
+                        current_list.append(cls)
+                        if len(current_list) >= 3:
+                            break
 
             # Determine detection method from stack
             lang = (stack_early.get("language") or "").lower()
@@ -1878,9 +2026,19 @@ async def _scan_project_impl(
 
             for mod_name, class_count in mod_class_counts.items():
                 role_counts = mod_role_counts.get(mod_name, {})
-                roles_summary = ", ".join(
-                    f"{cnt} {role}" for role, cnt in sorted(role_counts.items()) if cnt
-                )
+                role_examples = mod_role_examples.get(mod_name, {})
+                # Build summary with example class names
+                parts = []
+                for role, cnt in sorted(role_counts.items()):
+                    if cnt == 0:
+                        continue
+                    examples = role_examples.get(role, [])
+                    if examples:
+                        examples_str = " (" + ", ".join(examples) + ")"
+                    else:
+                        examples_str = ""
+                    parts.append(f"{cnt} {role}{examples_str}")
+                roles_summary = ", ".join(parts)
                 await _write_module_to_neo4j(
                     mod_name, project_id, class_count, roles_summary, det_method
                 )
@@ -2117,6 +2275,40 @@ async def _scan_project_impl(
             logger.warning("Scan [%s]: pattern discovery timed out after 30 s — skipping", project_id)
         except Exception:
             logger.warning("Scan [%s]: pattern discovery failed — continuing", project_id, exc_info=True)
+
+    # ── Ghost node cleanup for full scans (remove nodes for files that no longer exist) ──
+    if scan_mode == "full" and neo4j_available and source_files:
+        try:
+            ghost_deleted = await neo4j_client.query(
+                """
+                MATCH (n)
+                WHERE n.project_id = $project_id
+                  AND n.file_path IS NOT NULL
+                  AND NOT n.file_path IN $file_paths
+                WITH n, count(n) AS cnt
+                DETACH DELETE n
+                RETURN cnt
+                """,
+                {"project_id": project_id, "file_paths": list(source_files)},
+            )
+            n_deleted = len(ghost_deleted)
+            if n_deleted:
+                logger.info(
+                    "Scan [%s]: full scan ghost cleanup — deleted %d stale nodes for files no longer on disk",
+                    project_id, n_deleted,
+                )
+        except Exception:
+            logger.warning(
+                "Scan [%s]: full scan ghost node cleanup failed — continuing",
+                project_id, exc_info=True,
+            )
+
+    # Final scan summary logging
+    logger.info(
+        "Scan [%s]: summary — files=%d, classes=%d, functions=%d, imports_edges=%d, contains_edges=%d, calls_edges=%d, extends_edges=%d",
+        project_id, len(source_files), len(all_classes), len(all_functions),
+        edges_imports, edges_contains, edges_calls, edges_extends
+    )
 
     result = {"files_found": len(source_files), "classes_found": len(all_classes),
               "functions_found": len(all_functions), "modules": module_names,

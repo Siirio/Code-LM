@@ -29,16 +29,41 @@ class ChatResponse(BaseModel):
     memory_update_proposal: dict | None = None
 
 
-def _resolve_key(user_key: str) -> str:
-    """Use the user's own key if provided, otherwise fall back to the backend's .env key."""
-    return user_key.strip() or settings.anthropic_api_key
+def _resolve_provider_and_key(user_key: str, x_provider: str) -> tuple[str, str]:
+    """Determine the LLM provider and API key to use for this request.
+
+    Priority:
+    1. Explicit X-Provider header (if provided by the client)
+    2. Auto-detect from key prefix (sk-ant- → anthropic, sk- → deepseek)
+    3. Server default from settings.llm_provider
+
+    Key falls back to the server .env key for the resolved provider.
+    """
+    key = user_key.strip()
+    explicit_provider = x_provider.strip().lower()
+
+    if explicit_provider in ("anthropic", "deepseek"):
+        provider = explicit_provider
+    elif key.startswith("sk-ant-"):
+        provider = "anthropic"
+    elif key:
+        provider = "deepseek"
+    else:
+        provider = settings.llm_provider
+
+    if not key:
+        key = settings.deepseek_api_key if provider == "deepseek" else settings.anthropic_api_key
+
+    return provider, key
 
 
 @router.post("", response_model=ChatResponse)
 async def chat(
     request: ChatRequest,
     x_api_key: str = Header(default="", alias="X-Api-Key"),
+    x_provider: str = Header(default="", alias="X-Provider"),
 ):
+    provider, api_key = _resolve_provider_and_key(x_api_key, x_provider)
     try:
         result = await orchestrator_chat(
             project_id=request.project_id,
@@ -46,18 +71,15 @@ async def chat(
             conversation_id=request.conversation_id,
             session_id=request.session_id,
             agent_id=request.agent_id,
-            api_key=_resolve_key(x_api_key),
-            provider_name="anthropic",
+            api_key=api_key,
+            provider_name=provider,
             model=settings.llm_model or None,
         )
         return ChatResponse(**result)
 
     except anthropic.AuthenticationError as e:
         logger.error("Anthropic authentication error: %s", e)
-        raise HTTPException(
-            status_code=401,
-            detail="Anthropic API key is invalid or missing.",
-        )
+        raise HTTPException(status_code=401, detail="Anthropic API key is invalid or missing.")
 
     except anthropic.BadRequestError as e:
         logger.error("Anthropic bad request: %s", e)
@@ -93,6 +115,7 @@ async def chat(
 async def chat_stream(
     request: ChatRequest,
     x_api_key: str = Header(default="", alias="X-Api-Key"),
+    x_provider: str = Header(default="", alias="X-Provider"),
     x_budget_balance: float = Header(default=999.0, alias="X-Budget-Balance"),
 ):
     """Stream chat responses as Server-Sent Events.
@@ -103,6 +126,7 @@ async def chat_stream(
       - data: {"cost_usd": 0.0023, "balance_usd": 14.9977}  per-turn cost
       - data: {"done": true}                          end of response
 
+    X-Provider: "anthropic" | "deepseek" (optional — auto-detected from key if omitted)
     X-Budget-Balance: caller's current USD balance (credits mode only).
     When the user supplies their own API key the balance is ignored (999).
 
@@ -113,6 +137,7 @@ async def chat_stream(
     server-issued subscription token, verify it here, and reject requests that
     exceed the stored balance without relying on the client-sent value.
     """
+    provider, api_key = _resolve_provider_and_key(x_api_key, x_provider)
     user_key = x_api_key.strip()
     # Users with their own key have unlimited budget (billed directly to them)
     budget = 999.0 if user_key else max(x_budget_balance, -999.0)
@@ -124,8 +149,8 @@ async def chat_stream(
             conversation_id=request.conversation_id,
             session_id=request.session_id,
             agent_id=request.agent_id,
-            api_key=_resolve_key(user_key),
-            provider_name="anthropic",
+            api_key=api_key,
+            provider_name=provider,
             model=settings.llm_model or None,
             budget_usd=budget,
         ),

@@ -4,6 +4,7 @@ const BASE = '/api/v1'
 
 export interface AuthConfig {
   apiKey: string
+  provider?: 'anthropic' | 'deepseek'
 }
 
 export function loadAuth(): AuthConfig | null {
@@ -81,7 +82,10 @@ export function canSendMessage(balance_usd: number): boolean {
 function authHeaders(): Record<string, string> {
   const auth = loadAuth()
   if (!auth?.apiKey) return {}
-  return { 'X-Api-Key': auth.apiKey }
+  return {
+    'X-Api-Key': auth.apiKey,
+    ...(auth.provider ? { 'X-Provider': auth.provider } : {}),
+  }
 }
 
 export interface ProjectStatus {
