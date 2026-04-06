@@ -52,6 +52,8 @@ a = Analysis(
         'fastapi.responses',
         # LLM providers
         'anthropic',
+        'openai',
+        'llm.deepseek_provider',
         # Embedding (ONNX runtime — no PyTorch)
         'onnxruntime',
         'tokenizers',
@@ -73,6 +75,8 @@ a = Analysis(
         'scanner.role_inference',
         'scanner.java_treesitter',
         'scanner.module_detector',
+        # Orchestrator sub-modules
+        'orchestrator.hypothesis_engine',
     ],
     hookspath=[],
     hooksconfig={},
